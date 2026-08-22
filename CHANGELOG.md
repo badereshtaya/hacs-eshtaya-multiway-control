@@ -27,6 +27,12 @@
 - Current-schema validation guard to prevent silent loss of malformed/future data.
 - Architecture documentation and a release field-test matrix.
 
+### Fixed
+
+- Fixed pytest module discovery in GitHub Actions by adding the repository root to pytest `pythonpath`.
+- Run tests with `python -m pytest` for deterministic package resolution.
+- Updated config-flow result typing/tests to the current Home Assistant `ConfigFlowResult` / `FlowResultType` APIs.
+
 ### Changed
 
 - Physical output is explicitly treated as the load authority.
