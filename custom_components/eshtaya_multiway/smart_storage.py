@@ -15,6 +15,7 @@ from .const import (
     MODE_EVENT,
     MODE_MIRROR,
     PERFORMANCE_MODES,
+    SMART_ACTION_TYPES,
     SMART_CONTROLLER_DOMAINS,
     SMART_DEFAULT_BEHAVIOR,
     SMART_DIRECTIONS,
@@ -414,6 +415,10 @@ class SmartGroupStore:
             else None
         )
         group_type = str(explicit_group_type or inferred_group_type or VIRTUAL_LIGHT).strip()
+        if controller and group_type in SMART_ACTION_TYPES and behavior.get("controller_mode") == MODE_MIRROR:
+            # Stateless Action Groups treat a wall/button transition as a trigger,
+            # never as a state to mirror.
+            behavior["controller_mode"] = MODE_EVENT
 
         return {
             "id": payload.get("id") if keep_id else uuid4().hex,
@@ -496,15 +501,23 @@ class SmartGroupStore:
             ("max_retries", 0, 5),
             ("member_delay_ms", 0, 5000),
             ("manual_priority_ms", 0, 10000),
+            ("source_stable_ms", 50, 2000),
             ("scene_guard_ms", 0, 10000),
             ("flap_threshold", 3, 50),
             ("flap_window_sec", 1, 120),
             ("quarantine_sec", 5, 3600),
             ("command_echo_ms", 250, 15000),
+            ("action_cooldown_ms", 0, 5000),
+            ("scene_transition", 0, 300),
         ):
             value = float(behavior.get(key, SMART_DEFAULT_BEHAVIOR[key]))
             if not low <= value <= high:
                 raise ValueError(f"{key} is outside the supported range")
+
+        if behavior.get("action_execution", "parallel") not in {"parallel", "sequential"}:
+            raise ValueError("Unsupported Action Group execution mode")
+        if not isinstance(behavior.get("action_data", {}), dict):
+            raise ValueError("Action Group data must be a JSON object")
 
     def _compatibility_signature(self, entity_id: str, group_type: str) -> tuple[Any, ...] | None:
         """Return the strict compatibility signature for a Smart Group member.

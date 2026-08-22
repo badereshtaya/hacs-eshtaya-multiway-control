@@ -53,6 +53,7 @@ class GroupRuntime:
     authority_source: str | None = None
     authority_state: str | None = None
     authority_until: float = 0.0
+    authority_generation: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize public runtime state."""
@@ -77,4 +78,5 @@ class GroupRuntime:
             "authority_source": self.authority_source,
             "authority_state": self.authority_state,
             "authority_active": monotonic() < self.authority_until,
+            "authority_generation": self.authority_generation,
         }

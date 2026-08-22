@@ -47,8 +47,8 @@ Resolve any failure before release.
 Create and push the version tag:
 
 ```bash
-git tag v3.2.1
-git push origin v3.2.1
+git tag v3.3.0
+git push origin v3.3.0
 ```
 
 The included **Release** GitHub Action verifies that the tag matches `manifest.json`, builds the integration ZIP, and creates the actual GitHub Release automatically.

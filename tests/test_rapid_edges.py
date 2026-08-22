@@ -12,6 +12,12 @@ def test_opposite_edges_are_never_debounced() -> None:
     assert MultiWayManager._debounced(group, runtime, "switch.secondary", "on") is False
     assert MultiWayManager._debounced(group, runtime, "switch.secondary", "off") is False
     assert runtime.rapid_edges_seen == 1
+
+    manager = MultiWayManager.__new__(MultiWayManager)
+    generation = manager._claim_source_authority(
+        group, runtime, "switch.secondary", "off"
+    )
+    assert generation == 1
     assert runtime.authority_source == "switch.secondary"
     assert runtime.authority_state == "off"
     assert runtime.authority_until > 0

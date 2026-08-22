@@ -67,3 +67,12 @@ Every release candidate must pass:
 - Ruff
 - Pytest
 - Release tag/version check
+## Smart Group cloud convergence regression
+
+- Issue a Smart Group ON/OFF command to cloud-backed members.
+- Allow one or more members to report the requested state after an initial delay.
+- Confirm no `Out of sync` Repair issue is raised while the configured convergence timeout is still active.
+- Confirm only members still stale are retried, and only up to `max_retries`.
+- Confirm a Repair issue is created only when mismatches remain after the complete convergence window.
+- Confirm Continuous Enforcement remains opt-in and the watchdog does not fight later external automations.
+

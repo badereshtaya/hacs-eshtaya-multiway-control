@@ -467,6 +467,14 @@ class MultiWayStore:
         authority_window = int(behavior.get("authority_window_ms", 1800))
         if not 0 <= authority_window <= 10000:
             raise ValueError("authority_window_ms must be between 0 and 10000")
+        rapid_settle = int(behavior.get("rapid_settle_ms", 2600))
+        if not 250 <= rapid_settle <= 10000:
+            raise ValueError("rapid_settle_ms must be between 250 and 10000")
+        source_stable = int(behavior.get("source_stable_ms", 220))
+        if not 50 <= source_stable <= 2000:
+            raise ValueError("source_stable_ms must be between 50 and 2000")
+        if source_stable >= rapid_settle:
+            raise ValueError("source_stable_ms must be lower than rapid_settle_ms")
         if behavior.get("output_restore_policy") not in {"adopt", "enforce"}:
             raise ValueError("output_restore_policy must be adopt or enforce")
         if behavior.get("performance_mode") not in PERFORMANCE_MODES:

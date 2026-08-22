@@ -81,6 +81,7 @@ class SmartGroupEntity(Entity):
         return {
             "smart_group_id": self.group_id,
             "kind": group.get("kind"),
+            "group_type": group.get("group_type") or group.get("virtual_type"),
             "controller": group.get("controller_entity"),
             "members": [m["entity_id"] for m in group.get("members", [])],
             "member_count": len(group.get("members", [])),
@@ -99,6 +100,8 @@ class SmartGroupEntity(Entity):
             "hide_members": bool(group.get("hide_members")),
             "preferred_entity_id": group.get("preferred_entity_id"),
             "takeover_managed": bool((group.get("migration") or {}).get("takeover")),
+            "action_execution": group.get("behavior", {}).get("action_execution"),
+            "automation_skip_condition": group.get("behavior", {}).get("automation_skip_condition"),
         }
 
     def _still_expected(self, group: dict[str, Any] | None) -> bool:

@@ -284,9 +284,9 @@ async def test_operational_enable_toggle_bypasses_config_lock() -> None:
 
 def test_domain_native_group_types_match_home_assistant_group_menu() -> None:
     """Smart Groups expose every current Home Assistant Group domain."""
-    from custom_components.eshtaya_multiway.const import SMART_GROUP_TYPES
+    from custom_components.eshtaya_multiway.const import SMART_NATIVE_GROUP_TYPES
 
-    assert SMART_GROUP_TYPES == {
+    assert SMART_NATIVE_GROUP_TYPES == {
         "binary_sensor",
         "button",
         "cover",
@@ -438,3 +438,228 @@ def test_strict_sensor_group_allows_same_device_class_different_native_units() -
         keep_id=False,
     )
     store._validate(group)  # noqa: SLF001
+
+
+def test_action_group_domains_are_supported_extensions() -> None:
+    """Scene, script, and automation groups are valid Eshtaya Action Groups."""
+    from custom_components.eshtaya_multiway.const import SMART_ACTION_TYPES, SMART_GROUP_TYPES
+
+    assert SMART_ACTION_TYPES == {"scene", "script", "automation"}
+    assert SMART_ACTION_TYPES <= SMART_GROUP_TYPES
+
+
+def test_action_group_rejects_cross_domain_members() -> None:
+    """Action Groups remain domain-pure just like native Smart Groups."""
+    store = SmartGroupStore.__new__(SmartGroupStore)
+    group = store._normalize(  # noqa: SLF001
+        {
+            "name": "Evening actions",
+            "kind": SMART_KIND_VIRTUAL,
+            "group_type": "scene",
+            "members": [
+                {"entity_id": "scene.evening"},
+                {"entity_id": "script.good_night"},
+            ],
+        },
+        keep_id=False,
+    )
+    with pytest.raises(ValueError, match="this is a scene group"):
+        store._validate(group)  # noqa: SLF001
+
+
+def test_action_group_defaults_are_safe() -> None:
+    """Action Groups default to parallel execution and guarded physical triggering."""
+    store = SmartGroupStore.__new__(SmartGroupStore)
+    group = store._normalize(  # noqa: SLF001
+        {
+            "name": "Evening scenes",
+            "kind": SMART_KIND_VIRTUAL,
+            "group_type": "scene",
+            "members": [{"entity_id": "scene.evening"}],
+        },
+        keep_id=False,
+    )
+    store._validate(group)  # noqa: SLF001
+    assert group["behavior"]["action_execution"] == "parallel"
+    assert group["behavior"]["action_cooldown_ms"] == 250
+
+
+@pytest.mark.asyncio
+async def test_verification_waits_for_cloud_convergence_before_faulting() -> None:
+    """A slow member can converge inside the timeout without a false Repair issue."""
+    from custom_components.eshtaya_multiway.smart_group_manager import SmartGroupManager
+
+    manager = SmartGroupManager.__new__(SmartGroupManager)
+    manager._groups = {  # noqa: SLF001
+        "group-1": {
+            "id": "group-1",
+            "name": "Cloud Lights",
+            "behavior": {
+                "command_timeout": 0.5,
+                "auto_heal": False,
+                "max_retries": 0,
+                "notify_on_fault": False,
+            },
+        }
+    }
+    manager._runtime = {  # noqa: SLF001
+        "group-1": {
+            "last_transaction_id": "tx-1",
+            "verification_active": True,
+            "last_error": None,
+        }
+    }
+
+    checks = 0
+
+    def mismatches(_group, _expected):
+        nonlocal checks
+        checks += 1
+        return ["light.slow_cloud_member"] if checks < 3 else []
+
+    issues: list[str] = []
+    manager._mismatches = mismatches  # type: ignore[method-assign]  # noqa: SLF001
+    manager._create_issue = lambda _group, message: issues.append(message)  # type: ignore[method-assign]  # noqa: SLF001
+    manager._delete_issue = lambda _issue_id: None  # type: ignore[method-assign]  # noqa: SLF001
+    manager._refresh_runtime = lambda _group_id: None  # type: ignore[method-assign]  # noqa: SLF001
+    manager._notify = lambda _group_id: None  # type: ignore[method-assign]  # noqa: SLF001
+
+    await manager._async_verify("group-1", "on", "tx-1")  # noqa: SLF001
+
+    assert checks >= 3
+    assert issues == []
+    assert manager._runtime["group-1"]["last_error"] is None  # noqa: SLF001
+    assert manager._runtime["group-1"]["verification_active"] is False  # noqa: SLF001
+
+
+def test_action_controller_edge_modes() -> None:
+    """Action Groups only fire on the configured physical-controller edge."""
+    from custom_components.eshtaya_multiway.smart_group_manager import SmartGroupManager
+
+    manager = SmartGroupManager.__new__(SmartGroupManager)
+    group = {"behavior": {"controller_mode": "momentary_on"}}
+    assert manager._action_controller_fired(group, "off", "on") is True  # noqa: SLF001
+    assert manager._action_controller_fired(group, "on", "off") is False  # noqa: SLF001
+
+
+def test_smart_onoff_source_reads_real_final_member_state() -> None:
+    """Final convergence reads the actual source instead of a stale desired state."""
+    from types import SimpleNamespace
+
+    from custom_components.eshtaya_multiway.smart_group_manager import SmartGroupManager
+
+    manager = SmartGroupManager.__new__(SmartGroupManager)
+    manager.hass = SimpleNamespace(
+        states=SimpleNamespace(get=lambda _entity_id: SimpleNamespace(state="off"))
+    )
+    group = {"behavior": {"controller_mode": "mirror", "invert_controller": False}}
+    assert (
+        manager._onoff_source_state(  # noqa: SLF001
+            group, "switch.member", is_controller=False
+        )
+        == "off"
+    )
+
+
+@pytest.mark.asyncio
+async def test_scene_action_group_dispatches_every_member() -> None:
+    """A Scene Action Group runs all enabled scene members."""
+    from types import SimpleNamespace
+    from custom_components.eshtaya_multiway.smart_group_manager import SmartGroupManager
+
+    calls: list[tuple[str, str, dict]] = []
+
+    async def async_call(domain, service, data, **_kwargs):
+        calls.append((domain, service, data))
+
+    manager = SmartGroupManager.__new__(SmartGroupManager)
+    manager.hass = SimpleNamespace(
+        states=SimpleNamespace(get=lambda _entity_id: SimpleNamespace(state="scening")),
+        services=SimpleNamespace(async_call=async_call),
+    )
+    manager._groups = {  # noqa: SLF001
+        "g1": {
+            "id": "g1",
+            "name": "Evening",
+            "kind": "virtual",
+            "group_type": "scene",
+            "enabled": True,
+            "maintenance": False,
+            "members": [
+                {"entity_id": "scene.one", "enabled": True},
+                {"entity_id": "scene.two", "enabled": True},
+            ],
+            "behavior": {
+                "action_execution": "parallel",
+                "action_cooldown_ms": 250,
+                "scene_transition": 1.5,
+                "action_data": {},
+                "performance_mode": "instant",
+                "failure_policy": "continue",
+                "member_delay_ms": 0,
+            },
+        }
+    }
+    manager._runtime = {"g1": SmartGroupManager._new_runtime()}  # noqa: SLF001
+    manager._action_last_run = {}  # noqa: SLF001
+    manager._is_quarantined = lambda _gid, _entity: False  # type: ignore[method-assign]  # noqa: SLF001
+    manager._metric = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    manager._add_activity = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    manager._refresh_runtime = lambda _gid: None  # type: ignore[method-assign]  # noqa: SLF001
+    manager._notify = lambda _gid: None  # type: ignore[method-assign]  # noqa: SLF001
+
+    assert await manager.async_run_action_group("g1") is True
+    assert len(calls) == 2
+    assert all(domain == "scene" and service == "turn_on" for domain, service, _ in calls)
+    assert all(data["transition"] == 1.5 for _domain, _service, data in calls)
+
+
+@pytest.mark.asyncio
+async def test_automation_action_group_uses_trigger_not_turn_on() -> None:
+    """Automation Action Groups execute actions via automation.trigger."""
+    from types import SimpleNamespace
+
+    from custom_components.eshtaya_multiway.smart_group_manager import SmartGroupManager
+
+    calls: list[tuple[str, str, dict]] = []
+
+    async def async_call(domain, service, data, **_kwargs):
+        calls.append((domain, service, data))
+
+    manager = SmartGroupManager.__new__(SmartGroupManager)
+    manager.hass = SimpleNamespace(
+        states=SimpleNamespace(get=lambda _entity_id: SimpleNamespace(state="on")),
+        services=SimpleNamespace(async_call=async_call),
+    )
+    manager._groups = {  # noqa: SLF001
+        "g1": {
+            "id": "g1",
+            "name": "Run automations",
+            "kind": "virtual",
+            "group_type": "automation",
+            "enabled": True,
+            "maintenance": False,
+            "members": [{"entity_id": "automation.one", "enabled": True}],
+            "behavior": {
+                "action_execution": "parallel",
+                "action_cooldown_ms": 250,
+                "automation_skip_condition": False,
+                "action_data": {},
+                "performance_mode": "instant",
+                "failure_policy": "continue",
+                "member_delay_ms": 0,
+            },
+        }
+    }
+    manager._runtime = {"g1": SmartGroupManager._new_runtime()}  # noqa: SLF001
+    manager._action_last_run = {}  # noqa: SLF001
+    manager._is_quarantined = lambda _gid, _entity: False  # type: ignore[method-assign]  # noqa: SLF001
+    manager._metric = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    manager._add_activity = lambda *_args, **_kwargs: None  # type: ignore[method-assign]  # noqa: SLF001
+    manager._refresh_runtime = lambda _gid: None  # type: ignore[method-assign]  # noqa: SLF001
+    manager._notify = lambda _gid: None  # type: ignore[method-assign]  # noqa: SLF001
+
+    assert await manager.async_run_action_group("g1") is True
+    assert calls == [
+        ("automation", "trigger", {"entity_id": "automation.one", "skip_condition": False})
+    ]

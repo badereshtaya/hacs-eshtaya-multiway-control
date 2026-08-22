@@ -71,3 +71,10 @@ test_smart_group:
       required: true
       selector:
         text:
+
+run_smart_group:
+  fields:
+    group_id:
+      required: true
+      selector:
+        text:

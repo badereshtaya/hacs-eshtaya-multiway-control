@@ -368,6 +368,7 @@ class MultiWayManager:
             if (
                 group.get("behavior", {}).get("source_policy", "latest_physical") == "latest_physical"
                 and runtime.authority_source
+                and runtime.authority_source != entity_id
                 and runtime.authority_state in VALID_STATES
                 and monotonic() < runtime.authority_until
             ):
@@ -397,11 +398,17 @@ class MultiWayManager:
                     )
                 )
                 return
-            runtime.authority_source = None
-            runtime.authority_state = None
-            runtime.authority_until = 0.0
+            if group.get("behavior", {}).get("source_policy", "latest_physical") == "latest_physical":
+                generation = self._claim_source_authority(group, runtime, entity_id, new_state)
+            else:
+                generation = None
+                runtime.authority_source = None
+                runtime.authority_state = None
+                runtime.authority_until = 0.0
             async with self._locks[group_id]:
                 await self._async_accept_output_change(group, new_state, entity_id)
+            if generation is not None:
+                self._schedule_source_reconcile(group_id, entity_id, generation)
             return
 
         controller = self._controller(group, entity_id)
@@ -429,11 +436,15 @@ class MultiWayManager:
         if self._debounced(group, runtime, entity_id, target):
             return
 
-        # A different physical controller always becomes immediately eligible as
-        # input. A short authority lease is only created by rapid opposite edges
-        # from the same source (inside _debounced), where cloud echo reordering is
-        # the actual risk we need to protect against.
-        if runtime.authority_source and runtime.authority_source != entity_id:
+        generation = None
+        if (
+            mode == MODE_MIRROR
+            and group.get("behavior", {}).get("source_policy", "latest_physical") == "latest_physical"
+        ):
+            generation = self._claim_source_authority(
+                group, runtime, entity_id, target
+            )
+        elif runtime.authority_source and runtime.authority_source != entity_id:
             runtime.authority_source = None
             runtime.authority_state = None
             runtime.authority_until = 0.0
@@ -446,6 +457,8 @@ class MultiWayManager:
             input_sequence=input_sequence,
             engine_delay_ms=engine_delay_ms,
         )
+        if generation is not None:
+            self._schedule_source_reconcile(group_id, entity_id, generation)
 
     async def _async_handle_recovery(
         self, group: dict[str, Any], entity_id: str, new_state: str
@@ -596,7 +609,7 @@ class MultiWayManager:
                     transaction_id=txid,
                     wait=False,
                     blocking=False,
-                    skip_entity_id=source if origin in {"physical_controller", "test_center"} else None,
+                    skip_entity_id=source if origin in {"physical_controller", "test_center", "source_settle"} else None,
                 )
                 runtime.last_latency_ms = int((monotonic() - started) * 1000)
                 self._add_activity(
@@ -616,8 +629,8 @@ class MultiWayManager:
                 self._notify(group_id)
                 if confirm:
                     self._schedule_fast_verification(group_id, state, txid, source, origin)
-                if origin in {"physical_controller", "test_center"}:
-                    self._schedule_source_reconcile(group_id, source, state, txid)
+                # Physical-source settle is scheduled from the state-event handler,
+                # where the authoritative generation is known.
                 return all(controller_results)
 
             # Balanced: dispatch output without blocking the service handler, but
@@ -647,7 +660,7 @@ class MultiWayManager:
                 transaction_id=txid,
                 wait=safe,
                 blocking=safe,
-                skip_entity_id=source if origin in {"physical_controller", "test_center"} else None,
+                skip_entity_id=source if origin in {"physical_controller", "test_center", "source_settle"} else None,
             )
             runtime.last_latency_ms = int((monotonic() - started) * 1000)
             success = all(controller_results)
@@ -667,8 +680,7 @@ class MultiWayManager:
             self._update_health(group_id)
             self._refresh_repairs_for_group(group_id)
             self._notify(group_id)
-            if origin in {"physical_controller", "test_center"}:
-                self._schedule_source_reconcile(group_id, source, state, txid)
+            # Physical-source settle is scheduled from the state-event handler.
             return success
 
     def _record_immediate_output_failure(
@@ -1513,15 +1525,8 @@ class MultiWayManager:
         runtime.last_input_time[entity_id] = now
         runtime.last_input_state[entity_id] = semantic_state
         if previous_state != semantic_state:
-            authority_window = max(0, min(int(group["behavior"].get("authority_window_ms", 1800)), 10000)) / 1000
-            if (
-                group["behavior"].get("source_policy", "latest_physical") == "latest_physical"
-                and previous_time and authority_window > 0 and now - previous_time < authority_window
-            ):
+            if previous_time and now - previous_time < max(0.01, float(group["behavior"].get("rapid_settle_ms", 2600)) / 1000):
                 runtime.rapid_edges_seen += 1
-                runtime.authority_source = entity_id
-                runtime.authority_state = semantic_state
-                runtime.authority_until = now + authority_window
             return False
         return debounce > 0 and now - previous_time < debounce
 
@@ -1538,21 +1543,26 @@ class MultiWayManager:
         metric["last_result"] = "success" if success else "failed"
         metric["last_timestamp"] = _utcnow()
 
+    def _claim_source_authority(
+        self, group: dict[str, Any], runtime: GroupRuntime, source: str, state: str
+    ) -> int:
+        """Make the latest physical mirror/output source authoritative for settling."""
+        settle_ms = max(250, min(int(group["behavior"].get("rapid_settle_ms", 2600)), 10000))
+        runtime.authority_generation += 1
+        runtime.authority_source = source
+        runtime.authority_state = state
+        runtime.authority_until = monotonic() + settle_ms / 1000
+        return runtime.authority_generation
+
     def _schedule_source_reconcile(
-        self, group_id: str, source: str, requested_state: str, txid: str
+        self, group_id: str, source: str, generation: int
     ) -> None:
-        """Re-read the source after rapid activity so its latest physical state wins."""
-        group = self._groups.get(group_id)
-        if not group or source in {group.get("output"), group.get("behavior", {}).get("fallback_output")} :
-            return
-        controller = self._controller(group, source)
-        if not controller or controller.get("mode") != MODE_MIRROR:
-            return
+        """Settle rapid physical input and converge the group to the source's final state."""
         previous = self._source_reconcile_tasks.pop(group_id, None)
-        if previous:
+        if previous and not previous.done():
             previous.cancel()
         task = self.hass.async_create_task(
-            self._async_reconcile_source(group_id, source, requested_state, txid)
+            self._async_reconcile_source(group_id, source, generation)
         )
         self._source_reconcile_tasks[group_id] = task
         task.add_done_callback(
@@ -1560,36 +1570,92 @@ class MultiWayManager:
             if self._source_reconcile_tasks.get(gid) is done else None
         )
 
+    def _authoritative_source_state(
+        self, group: dict[str, Any], source: str
+    ) -> str | None:
+        state = self.hass.states.get(source)
+        if not state or state.state not in VALID_STATES:
+            return None
+        if source in {group.get("output"), group.get("behavior", {}).get("fallback_output")}:
+            return state.state
+        controller = self._controller(group, source)
+        if not controller or controller.get("mode") != MODE_MIRROR:
+            return None
+        mapped = self._controller_to_group_state(controller, state.state)
+        return mapped if mapped in VALID_STATES else None
+
     async def _async_reconcile_source(
-        self, group_id: str, source: str, requested_state: str, txid: str
+        self, group_id: str, source: str, generation: int
     ) -> None:
+        """Wait for the source to settle, then make every other member match it.
+
+        This is intentionally independent of an individual transaction ID. Cloud
+        integrations can publish rapid physical edges late; the authority generation
+        follows the physical source, while older transaction verifiers are already
+        version-aware and therefore cannot override the final state.
+        """
         try:
-            for delay in (0.08, 0.22, 0.55):
-                await asyncio.sleep(delay)
+            group = self._groups.get(group_id)
+            runtime = self._runtime.get(group_id)
+            if not group or not runtime:
+                return
+            settle_window = max(0.25, min(float(group["behavior"].get("rapid_settle_ms", 2600)) / 1000, 10.0))
+            stable_for = max(0.05, min(float(group["behavior"].get("source_stable_ms", 220)) / 1000, 2.0))
+            deadline = monotonic() + settle_window
+            last_state = self._authoritative_source_state(group, source)
+            if last_state not in VALID_STATES:
+                return
+            last_change = monotonic()
+
+            while monotonic() < deadline:
+                await asyncio.sleep(0.05)
                 group = self._groups.get(group_id)
                 runtime = self._runtime.get(group_id)
-                if not group or not runtime:
+                if not group or not runtime or not group.get("enabled", True):
                     return
-                if runtime.last_transaction_id != txid:
-                    runtime.stale_transactions_discarded += 1
+                if runtime.authority_generation != generation or runtime.authority_source != source:
                     return
-                controller = self._controller(group, source)
-                current = self.hass.states.get(source)
-                if not controller or not current or current.state not in VALID_STATES:
+                current = self._authoritative_source_state(group, source)
+                if current not in VALID_STATES:
                     return
-                actual = self._controller_to_group_state(controller, current.state)
-                if actual != requested_state:
-                    runtime.input_sequence += 1
-                    await self.async_request_state(
-                        group_id, actual, source=source, origin="physical_controller",
-                        input_sequence=runtime.input_sequence, engine_delay_ms=0,
-                    )
-                    self._add_activity(
-                        group_id=group_id, source=source, event="source_reconciled",
-                        action=actual, result="success",
-                        message="Latest physical source state overrode an older transaction",
-                    )
-                    return
+                if current != last_state:
+                    last_state = current
+                    last_change = monotonic()
+                    runtime.authority_state = current
+                    runtime.authority_until = monotonic() + settle_window
+                    runtime.rapid_edges_seen += 1
+                    continue
+                if monotonic() - last_change >= stable_for:
+                    break
+
+            group = self._groups.get(group_id)
+            runtime = self._runtime.get(group_id)
+            if not group or not runtime:
+                return
+            if runtime.authority_generation != generation or runtime.authority_source != source:
+                return
+            final_state = self._authoritative_source_state(group, source)
+            if final_state not in VALID_STATES:
+                return
+            runtime.authority_state = final_state
+            runtime.input_sequence += 1
+            await self.async_request_state(
+                group_id,
+                final_state,
+                source=source,
+                origin="source_settle",
+                input_sequence=runtime.input_sequence,
+                engine_delay_ms=0,
+            )
+            self._add_activity(
+                group_id=group_id,
+                source=source,
+                event="source_settled",
+                action=final_state,
+                result="success",
+                message="Final convergence matched the latest physical source state",
+            )
+            runtime.authority_until = monotonic() + stable_for
         except asyncio.CancelledError:
             return
 

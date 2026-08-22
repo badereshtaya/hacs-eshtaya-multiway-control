@@ -192,6 +192,16 @@
           "description": "المعرّف الداخلي."
         }
       }
+    },
+    "run_smart_group": {
+      "name": "تشغيل Action Group",
+      "description": "تشغيل جميع الأعضاء المفعّلين في جروب السيناريوهات أو السكربتات أو الأوتوميشنات.",
+      "fields": {
+        "group_id": {
+          "name": "معرّف الجروب",
+          "description": "المعرّف الداخلي لـ Action Group."
+        }
+      }
     }
   },
   "exceptions": {

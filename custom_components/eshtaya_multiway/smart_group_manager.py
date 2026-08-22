@@ -23,6 +23,7 @@ from .const import (
     PERFORMANCE_SAFE,
     SIGNAL_SMART_GROUPS_UPDATED,
     SIGNAL_SMART_RUNTIME_UPDATED,
+    SMART_ACTION_TYPES,
     SMART_DIRECTION_BIDIRECTIONAL,
     SMART_FAILURE_STOP,
     SMART_KIND_PHYSICAL,
@@ -75,6 +76,8 @@ class SmartGroupManager:
         self._verify_tasks: dict[str, asyncio.Task] = {}
         self._edge_queues: dict[str, deque[tuple[str, Event]]] = defaultdict(deque)
         self._edge_tasks: dict[str, asyncio.Task] = {}
+        self._action_last_run: dict[tuple[str, str], float] = {}
+        self._source_settle_tasks: dict[str, asyncio.Task] = {}
         self._started = False
 
     async def async_start(self) -> None:
@@ -98,15 +101,18 @@ class SmartGroupManager:
             *self._scene_tasks.values(),
             *self._verify_tasks.values(),
             *self._edge_tasks.values(),
+            *self._source_settle_tasks.values(),
         ):
             task.cancel()
         self._scene_tasks.clear()
         self._verify_tasks.clear()
         self._edge_tasks.clear()
+        self._source_settle_tasks.clear()
         self._edge_queues.clear()
         self._pending_contexts.clear()
         self._pending_expected.clear()
         self._global_expected.clear()
+        self._action_last_run.clear()
 
     async def async_reload(self) -> None:
         self._groups = {g["id"]: g for g in self.store.groups()}
@@ -130,6 +136,9 @@ class SmartGroupManager:
                 task = self._edge_tasks.pop(group_id, None)
                 if task and not task.done():
                     task.cancel()
+                settle_task = self._source_settle_tasks.pop(group_id, None)
+                if settle_task and not settle_task.done():
+                    settle_task.cancel()
         if self._unsub:
             self._unsub()
             self._unsub = None
@@ -193,6 +202,8 @@ class SmartGroupManager:
             "manual_authority_source": None,
             "manual_authority_state": None,
             "verification_active": False,
+            "source_generation": 0,
+            "source_settle_active": False,
         }
 
     def list_with_runtime(self) -> list[dict[str, Any]]:
@@ -338,19 +349,37 @@ class SmartGroupManager:
             self._refresh_runtime(group_id)
             self._notify(group_id)
             return
-        if _is_on_off_group(group) and self._record_flap(group, entity_id):
+        controller = group.get("controller_entity")
+        input_capable = (
+            entity_id == controller
+            or group["behavior"].get("direction") == SMART_DIRECTION_BIDIRECTIONAL
+        )
+        # Flapping protection is for followers, not legitimate human inputs. A
+        # wall controller or bidirectional member may be toggled rapidly on purpose
+        # and must never be auto-quarantined for that behavior.
+        if (
+            _is_on_off_group(group)
+            and not input_capable
+            and self._record_flap(group, entity_id)
+        ):
             self._refresh_runtime(group_id)
             self._notify(group_id)
             return
 
-        controller = group.get("controller_entity")
         if entity_id == controller:
-            if _is_on_off_group(group):
+            if _group_type(group) in SMART_ACTION_TYPES:
+                if self._action_controller_fired(group, old_state, new_state):
+                    await self.async_run_action_group(
+                        group_id, source=entity_id, origin="physical"
+                    )
+            elif _is_on_off_group(group):
                 target = self._controller_target(group, old_state, new_state)
                 if target in VALID_STATES:
                     await self.async_set_state(
                         group_id, target, source=entity_id, origin="physical"
                     )
+                    if group["behavior"].get("controller_mode", MODE_MIRROR) == MODE_MIRROR:
+                        self._schedule_onoff_source_settle(group_id, entity_id, is_controller=True)
             else:
                 await self._async_handle_domain_controller(
                     group_id, old_state, new_state, entity_id
@@ -378,11 +407,116 @@ class SmartGroupManager:
                 self._schedule_scene_settle(group_id)
                 return
             await self.async_set_state(group_id, new_state, source=entity_id, origin="member")
+            self._schedule_onoff_source_settle(group_id, entity_id, is_controller=False)
             return
 
         self._refresh_runtime(group_id)
         await self._reflect_controller_if_needed(group_id)
         self._notify(group_id)
+
+    def _schedule_onoff_source_settle(
+        self, group_id: str, source: str, *, is_controller: bool
+    ) -> None:
+        """Keep the latest physical/member source authoritative until it settles."""
+        group = self._groups.get(group_id)
+        if not group or not _is_on_off_group(group):
+            return
+        runtime = self._runtime[group_id]
+        runtime["source_generation"] = int(runtime.get("source_generation", 0)) + 1
+        generation = runtime["source_generation"]
+        runtime["source_settle_active"] = True
+        old = self._source_settle_tasks.get(group_id)
+        if old and not old.done():
+            old.cancel()
+        self._source_settle_tasks[group_id] = self.hass.async_create_task(
+            self._async_onoff_source_settle(group_id, source, generation, is_controller)
+        )
+
+    def _onoff_source_state(
+        self, group: dict[str, Any], source: str, *, is_controller: bool
+    ) -> str | None:
+        state = self.hass.states.get(source)
+        if state is None or state.state in UNAVAILABLE_STATES:
+            return None
+        if not is_controller:
+            return state.state if state.state in VALID_STATES else None
+        if group["behavior"].get("controller_mode", MODE_MIRROR) != MODE_MIRROR:
+            return None
+        mapped = state.state
+        if group["behavior"].get("invert_controller") and mapped in VALID_STATES:
+            mapped = _invert(mapped)
+        return mapped if mapped in VALID_STATES else None
+
+    async def _async_onoff_source_settle(
+        self, group_id: str, source: str, generation: int, is_controller: bool
+    ) -> None:
+        """Final convergence pass using the real final state of the last source."""
+        try:
+            group = self._groups.get(group_id)
+            if not group:
+                return
+            runtime = self._runtime[group_id]
+            max_window = max(0.25, min(10.0, float(
+                group["behavior"].get("manual_priority_ms", 2500)
+            ) / 1000))
+            stable_for = max(0.05, min(2.0, float(
+                group["behavior"].get("source_stable_ms", 220)
+            ) / 1000))
+            deadline = monotonic() + max_window
+            last = self._onoff_source_state(group, source, is_controller=is_controller)
+            changed_at = monotonic()
+            while monotonic() < deadline:
+                await asyncio.sleep(0.05)
+                current_group = self._groups.get(group_id)
+                if not current_group or not current_group.get("enabled", True):
+                    return
+                runtime = self._runtime[group_id]
+                if int(runtime.get("source_generation", 0)) != generation:
+                    return
+                current = self._onoff_source_state(
+                    current_group, source, is_controller=is_controller
+                )
+                if current is None:
+                    continue
+                if current != last:
+                    last = current
+                    changed_at = monotonic()
+                    runtime["manual_authority_until"] = monotonic() + max_window
+                    runtime["manual_authority_source"] = source
+                    runtime["manual_authority_state"] = current
+                    continue
+                if monotonic() - changed_at >= stable_for:
+                    break
+            runtime = self._runtime.get(group_id)
+            current_group = self._groups.get(group_id)
+            if not runtime or not current_group:
+                return
+            if int(runtime.get("source_generation", 0)) != generation:
+                return
+            final = self._onoff_source_state(
+                current_group, source, is_controller=is_controller
+            )
+            if final not in VALID_STATES:
+                return
+            runtime["manual_authority_until"] = monotonic() + max_window
+            runtime["manual_authority_source"] = source
+            runtime["manual_authority_state"] = final
+            self._add_activity(
+                group_id, "source_settled", source, final, "success", None,
+                runtime.get("last_transaction_id"), "source_settle",
+            )
+            await self.async_set_state(
+                group_id, final, source=source, origin="source_settle"
+            )
+        except asyncio.CancelledError:
+            return
+        finally:
+            runtime = self._runtime.get(group_id)
+            if runtime and int(runtime.get("source_generation", 0)) == generation:
+                runtime["source_settle_active"] = False
+            task = self._source_settle_tasks.get(group_id)
+            if task is asyncio.current_task():
+                self._source_settle_tasks.pop(group_id, None)
 
     def _controller_target(
         self, group: dict[str, Any], old_state: str | None, new_state: str
@@ -441,6 +575,146 @@ class SmartGroupManager:
         if mode == MODE_EVENT and old_state != new_state:
             return _invert(current)
         return None
+
+    def _action_controller_fired(
+        self, group: dict[str, Any], old_state: str | None, new_state: str
+    ) -> bool:
+        """Return whether a physical controller edge should run an Action Group."""
+        mode = group["behavior"].get("controller_mode", MODE_EVENT)
+        if mode in {MODE_EVENT, MODE_TOGGLE, MODE_MIRROR}:
+            return old_state != new_state
+        if mode == MODE_MOMENTARY_ON:
+            return new_state == "on" and old_state != new_state
+        if mode == MODE_MOMENTARY_OFF:
+            return new_state == "off" and old_state != new_state
+        return False
+
+    async def async_run_action_group(
+        self, group_id: str, *, source: str = "virtual", origin: str = "service"
+    ) -> bool:
+        """Run all members of a scene/script/automation Action Group."""
+        group = self._groups.get(group_id)
+        if not group:
+            raise ValueError("Smart Group not found")
+        group_type = _group_type(group)
+        if group_type not in SMART_ACTION_TYPES:
+            raise ValueError(f"{group_type} is not an Action Group")
+        if not group.get("enabled", True):
+            raise ValueError("Smart Group is disabled")
+        if group.get("maintenance"):
+            raise ValueError("Smart Group is in maintenance mode")
+
+        behavior = group["behavior"]
+        if origin == "physical":
+            key = (group_id, source)
+            now = monotonic()
+            cooldown = max(0.0, float(behavior.get("action_cooldown_ms", 250)) / 1000)
+            previous = self._action_last_run.get(key, 0.0)
+            if cooldown and now - previous < cooldown:
+                self._add_activity(
+                    group_id, "action_duplicate_suppressed", source, "run", "ignored",
+                    None, None, origin,
+                )
+                return True
+            self._action_last_run[key] = now
+
+        members = [
+            member["entity_id"]
+            for member in group["members"]
+            if member.get("enabled", True)
+            and not self._is_quarantined(group_id, member["entity_id"])
+        ]
+        if not members:
+            return False
+
+        service = {
+            "scene": "turn_on",
+            "script": "turn_on",
+            "automation": "trigger",
+        }[group_type]
+        txid = uuid4().hex[:12]
+        started = monotonic()
+
+        async def run_member(entity_id: str) -> bool:
+            state = self.hass.states.get(entity_id)
+            if state is None or state.state in UNAVAILABLE_STATES:
+                self._metric(group_id, entity_id, False, None)
+                return False
+            data: dict[str, Any] = {}
+            custom = behavior.get("action_data")
+            if group_type == "scene":
+                if isinstance(custom, dict):
+                    data.update(
+                        {key: value for key, value in custom.items() if key != "entity_id"}
+                    )
+                transition = float(behavior.get("scene_transition", 0) or 0)
+                if transition > 0:
+                    data["transition"] = transition
+            elif group_type == "script":
+                if isinstance(custom, dict) and custom:
+                    data["variables"] = custom
+            elif group_type == "automation":
+                data["skip_condition"] = bool(
+                    behavior.get("automation_skip_condition", True)
+                )
+            # Group membership is authoritative. Custom action data may never
+            # redirect a member call to a different entity.
+            data["entity_id"] = entity_id
+            context = Context()
+            member_started = monotonic()
+            try:
+                await self.hass.services.async_call(
+                    group_type,
+                    service,
+                    data,
+                    blocking=behavior.get("performance_mode") == PERFORMANCE_SAFE,
+                    context=context,
+                )
+                self._metric(
+                    group_id, entity_id, True, int((monotonic() - member_started) * 1000)
+                )
+                return True
+            except Exception:  # noqa: BLE001
+                self._metric(group_id, entity_id, False, None)
+                return False
+
+        results: list[bool] = []
+        execution = behavior.get("action_execution", "parallel")
+        if execution == "parallel":
+            results = list(await asyncio.gather(*(run_member(entity_id) for entity_id in members)))
+        else:
+            delay = max(0.0, float(behavior.get("member_delay_ms", 0)) / 1000)
+            for entity_id in members:
+                ok = await run_member(entity_id)
+                results.append(ok)
+                if not ok and behavior.get("failure_policy") == SMART_FAILURE_STOP:
+                    break
+                if delay:
+                    await asyncio.sleep(delay)
+
+        runtime = self._runtime[group_id]
+        success = all(results) if results else False
+        runtime.update(
+            {
+                "desired_state": None,
+                "last_source": source,
+                "last_action": "run",
+                "last_changed": _utcnow(),
+                "last_transaction_id": txid,
+                "last_latency_ms": int((monotonic() - started) * 1000),
+                "last_error": None if success else "One or more actions failed to start",
+            }
+        )
+        runtime["commands"] += 1
+        if not success:
+            runtime["failures"] += 1
+        self._add_activity(
+            group_id, "action_group_run", source, "run",
+            "success" if success else "partial", runtime["last_latency_ms"], txid, origin,
+        )
+        self._refresh_runtime(group_id)
+        self._notify(group_id)
+        return success
 
     async def _async_handle_domain_controller(
         self, group_id: str, old_state: str | None, new_state: str, source: str
@@ -722,40 +996,91 @@ class SmartGroupManager:
             return False
 
     async def _async_verify(self, group_id: str, expected: str, txid: str) -> None:
+        """Wait for the whole group to converge before reporting a fault.
+
+        Cloud-backed integrations can acknowledge a service call immediately and
+        publish the resulting entity states hundreds of milliseconds (or even a
+        few seconds) later.  Older builds checked after a short adaptive delay,
+        retried once, and could therefore raise an Out-of-sync Repair issue in
+        under a second even though the configured command timeout was 3 seconds.
+
+        Verification now treats ``command_timeout`` as a real convergence
+        window.  We poll cheaply for state convergence, perform only the
+        configured bounded retries against members that are still stale, and
+        create a Repair issue only when the complete window expires.
+        """
         try:
             group = self._groups.get(group_id)
             if not group:
                 return
-            timeout = float(group["behavior"].get("command_timeout", 3.0))
-            await asyncio.sleep(self._adaptive_verify_delay(group, timeout))
-            runtime = self._runtime.get(group_id)
-            if not runtime or runtime.get("last_transaction_id") != txid:
-                return
-            mismatches = self._mismatches(group, expected)
-            retries = (
-                int(group["behavior"].get("max_retries", 1))
+
+            timeout = max(0.25, float(group["behavior"].get("command_timeout", 3.0)))
+            started = monotonic()
+            deadline = started + timeout
+            poll_interval = min(0.25, max(0.10, timeout / 15))
+            retry_budget = (
+                max(0, int(group["behavior"].get("max_retries", 1)))
                 if group["behavior"].get("auto_heal", True)
                 else 0
             )
-            for _ in range(retries):
-                if not mismatches or runtime.get("last_transaction_id") != txid:
-                    break
-                await asyncio.gather(
-                    *(
-                        self._async_command_entity(group, entity_id, expected, txid)
+            # Give cloud devices a meaningful chance to report the first command
+            # before retrying.  With the default 3s window this is ~1.35s.
+            next_retry_at = started + min(1.5, max(0.6, timeout * 0.45))
+
+            runtime = self._runtime.get(group_id)
+            if not runtime or runtime.get("last_transaction_id") != txid:
+                return
+
+            mismatches = self._mismatches(group, expected)
+            while mismatches and monotonic() < deadline:
+                runtime = self._runtime.get(group_id)
+                if not runtime or runtime.get("last_transaction_id") != txid:
+                    return
+
+                now = monotonic()
+                if retry_budget > 0 and now >= next_retry_at:
+                    retry_targets = [
+                        entity_id
                         for entity_id in mismatches
                         if not self._is_quarantined(group_id, entity_id)
-                    )
-                )
-                await asyncio.sleep(min(timeout, 0.5))
+                    ]
+                    if retry_targets:
+                        await asyncio.gather(
+                            *(
+                                self._async_command_entity(
+                                    group, entity_id, expected, txid
+                                )
+                                for entity_id in retry_targets
+                            )
+                        )
+                    retry_budget -= 1
+                    remaining = max(0.0, deadline - monotonic())
+                    # Spread additional retries over the remaining convergence
+                    # window rather than hammering cloud APIs back-to-back.
+                    next_retry_at = monotonic() + max(0.4, remaining / (retry_budget + 1))
+
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(poll_interval, remaining))
                 mismatches = self._mismatches(group, expected)
-            if mismatches and runtime.get("last_transaction_id") == txid:
+
+            runtime = self._runtime.get(group_id)
+            if not runtime or runtime.get("last_transaction_id") != txid:
+                return
+
+            # One final read at the deadline prevents a state event arriving on
+            # the last poll boundary from creating a transient false warning.
+            mismatches = self._mismatches(group, expected)
+            if mismatches:
                 runtime["last_error"] = f"Out of sync: {', '.join(mismatches[:4])}"
                 self._create_issue(group, runtime["last_error"])
                 if group["behavior"].get("notify_on_fault"):
                     self._notify_fault(group, runtime["last_error"])
-            elif not mismatches:
+            else:
+                runtime["last_error"] = None
                 self._delete_issue(f"smart_group_out_of_sync_{group_id}")
+
             runtime["verification_active"] = False
             self._refresh_runtime(group_id)
             self._notify(group_id)
@@ -793,6 +1118,12 @@ class SmartGroupManager:
         if not group:
             raise ValueError("Smart Group not found")
         group_type = _group_type(group)
+        if group_type in SMART_ACTION_TYPES:
+            if action != "run":
+                raise ValueError(f"Unsupported {group_type} Action Group action: {action}")
+            return await self.async_run_action_group(
+                group_id, source=source, origin="panel"
+            )
         if group_type in SMART_ON_OFF_TYPES:
             if action not in VALID_STATES:
                 raise ValueError(f"Unsupported {group_type} group action: {action}")
@@ -1021,6 +1352,8 @@ class SmartGroupManager:
 
     def _compute_state(self, group: dict[str, Any]) -> str:
         group_type = _group_type(group)
+        if group_type in SMART_ACTION_TYPES:
+            return "available"
         states: list[str] = []
         for member in group["members"]:
             if not member.get("enabled", True) or self._is_quarantined(
@@ -1363,7 +1696,12 @@ class SmartGroupManager:
 
         if not enabled:
             # Stop all corrective/background work before persisting the disabled state.
-            for mapping in (self._verify_tasks, self._scene_tasks, self._edge_tasks):
+            for mapping in (
+                self._verify_tasks,
+                self._scene_tasks,
+                self._edge_tasks,
+                self._source_settle_tasks,
+            ):
                 task = mapping.pop(group_id, None)
                 if task and not task.done():
                     task.cancel()

@@ -1,5 +1,55 @@
 # Changelog
 
+## 3.3.0 - 2026-08-22
+
+### Action Groups and final-source convergence
+
+- Added Smart Action Groups for `scene`, `script`, and `automation` entities.
+- Added a native virtual **Run** button for every Action Group and the `eshtaya_multiway.run_smart_group` Home Assistant action.
+- Scene groups run members with `scene.turn_on`; Script groups use `script.turn_on`; Automation groups use `automation.trigger` so their action sequences execute.
+- Added Parallel and Sequential execution, per-member delay, physical-trigger duplicate guard, scene transition, script variables, and automation condition handling.
+- Added physical-controller support for Action Groups with event/momentary trigger modes.
+- Reworked Multi-Way rapid-input reconciliation: the latest physical Main or mirror Controller becomes the authoritative source until it settles, followed by one final convergence pass.
+- Added the same final-source settle protection to bidirectional ON/OFF Smart Groups.
+- Opposite rapid edges are never dropped by debounce; stale transaction/background verification cannot override a newer physical state.
+- Added explicit `rapid_settle_ms` / `source_stable_ms` validation and UI controls.
+- Updated Smart Group cards and editor so Action Groups expose Run instead of meaningless Sync/ON/OFF controls.
+
+## 3.2.4 - 2026-08-22
+
+### Smart entity selection
+
+- Member pickers now hide entities already selected in other member rows.
+- Physical controllers are excluded from Smart Group member pickers and vice versa.
+- Multi-Way outputs, controllers, and fallback outputs are mutually exclusive in the UI.
+- Learn Mode rejects entities already used in the same group.
+- Manual entry and save-time validation prevent duplicate entities even when datalist filtering is bypassed.
+- Removing an entity immediately makes it available again in the remaining pickers.
+
+## 3.2.3 - 2026-08-22
+
+### Area-based group navigation
+
+- Added **All + Home Assistant Area tabs** to both Multi-Way and Smart Groups pages.
+- Area tabs are generated automatically from groups that actually exist in each Area and show live group counts.
+- Added smart area resolution: explicit group Area first, then inferred Area from the main output/controller/members.
+- Entity Area overrides are respected; when an entity has no direct Area, the parent Device Area is used.
+- Groups spanning multiple Areas are placed under **Mixed areas**; groups with no resolvable Area appear under **Unassigned**.
+- Smart Group area tabs filter both Eshtaya-managed groups and discovered native Home Assistant Groups.
+- Filtering is client-side and does not reload data or disturb editor drafts.
+- Added responsive horizontally scrollable Area tabs for mobile installations.
+
+## 3.2.2 - 2026-08-22
+
+### Smart Group convergence hotfix
+
+- Fixed false `Out of sync` Repair warnings on cloud-backed Smart Groups caused by verification completing far earlier than the configured `command_timeout`.
+- `command_timeout` is now a real convergence window: member states are observed for the complete interval before a synchronization fault is reported.
+- Bounded retries are delayed and spread across the convergence window, and only target members that are still stale.
+- A final state read is performed at the convergence deadline to avoid boundary-race false positives.
+- Successful convergence now explicitly clears stale Smart Group synchronization errors and Repair issues.
+- No continuous enforcement was reintroduced: external automations remain free to control members after the bounded command verification window unless Continuous Enforcement is explicitly enabled.
+
 ## 3.2.1 - 2026-08-22
 
 ### Fixed

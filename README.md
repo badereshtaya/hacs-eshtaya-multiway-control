@@ -15,11 +15,13 @@
   <img src="https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5" alt="Home Assistant 2026.3+">
 </p>
 
-> **Current release:** `3.2.1`  
+> **Current release:** `3.3.0`  
 > **Integration domain:** `eshtaya_multiway`  
 > **Repository:** `badereshtaya/hacs-eshtaya-multiway-control`
 
 ---
+
+> **Smart Group cloud reliability:** verification waits for the complete convergence window before reporting an `Out of sync` fault.
 
 ## What is Eshtaya Multi-Way Control?
 
@@ -31,6 +33,7 @@ It contains **two independent engines**:
 |---|---|---|
 | **Multi-Way** | Software-defined 2-way / 3-way / N-way switching | One real living-room light output + wall switches at the entrance and sofa |
 | **Smart Groups** | Control many same-domain entities as one intelligent group | All living-room lights, all shutters, all fans, all temperature sensors |
+| **Action Groups** | Run many stateless Home Assistant actions from one button | Run several scenes, scripts or automation actions with one press |
 
 The integration does **not** connect directly to Tuya, Zigbee, KNX, Shelly or any vendor cloud. Your devices continue to be managed by their existing Home Assistant integrations; Eshtaya coordinates the entities that already exist in Home Assistant.
 
@@ -75,7 +78,7 @@ Press Entrance OFF  → light OFF + group synchronized
 Press Sofa ON       → light ON + group synchronized
 ```
 
-Rapid presses are handled in order. If a controller changes `OFF → ON → OFF` quickly, the final physical state wins instead of an older transaction restoring the wrong state.
+Rapid presses are handled in order. If the main output or any mirror controller changes `OFF → ON → OFF → ON` quickly, that exact source becomes temporarily authoritative. Eshtaya re-reads the real final source state after a short settle window and performs one final convergence pass, so an older cloud echo or transaction cannot leave the main and member on opposite states.
 
 ---
 
@@ -95,6 +98,26 @@ Members
 ```
 
 When the physical controller turns ON, the group sends ON to the members. When it turns OFF, the members turn OFF according to the selected group policy and reliability settings.
+
+---
+
+## Example 3 — Action Group
+
+Run several Home Assistant scenes with one press:
+
+```text
+Scene Action Group: Evening
+├── scene.living_evening
+├── scene.kitchen_evening
+└── scene.garden_evening
+
+Virtual control
+└── button.evening
+```
+
+The same concept works for `script.*` and `automation.*` members. Scene groups call `scene.turn_on`, script groups call `script.turn_on`, and automation groups call `automation.trigger` so the automation actions actually run instead of merely enabling their triggers. Automation conditions can be respected or skipped from the group settings.
+
+Action Groups can run **in parallel** for the fastest response or **sequentially** when order matters. A physical wall switch/button can also be assigned as the controller.
 
 ---
 
@@ -267,7 +290,7 @@ A Smart Group can be either:
 
 ## Supported native group domains
 
-V3.2+ supports the Home Assistant group domains below:
+V3.3 supports the Home Assistant native group domains below, plus Eshtaya Action Groups for scenes, scripts and automations:
 
 | Domain | Example | Native behavior |
 |---|---|---|
@@ -285,6 +308,17 @@ V3.2+ supports the Home Assistant group domains below:
 | `valve` | Water/gas/other valve group | Open, close, stop and position where supported |
 
 Eshtaya uses Home Assistant's native Group behavior as the base for rich domains, then adds Eshtaya management, health, commissioning and reliability features on top.
+
+### Eshtaya Action Group domains
+
+| Domain | Virtual control | What **Run** does |
+|---|---|---|
+| `scene` | `button.*` | Calls `scene.turn_on` for every enabled scene member |
+| `script` | `button.*` | Calls `script.turn_on` for every enabled script; optional JSON is passed as script variables |
+| `automation` | `button.*` | Calls `automation.trigger` for every enabled automation; choose whether conditions are skipped |
+
+Action Groups are intentionally stateless and appear as a **Run button**, not a fake ON/OFF entity. They support Parallel or Sequential execution, optional physical controllers, per-member delay, failure policy and a duplicate-trigger guard.
+
 
 ## Domain-aware entity filtering
 
@@ -635,7 +669,7 @@ https://github.com/badereshtaya/hacs-eshtaya-multiway-control
 Published versions use GitHub Releases and semantic version tags such as:
 
 ```text
-v3.2.1
+v3.3.0
 ```
 
 After a new GitHub Release is published, HACS can offer it as an update.
@@ -670,6 +704,15 @@ Always review diagnostics before sharing them publicly, especially if your entit
 ---
 
 # العربية — شرح مبسط
+
+### جروبات السيناريوهات والسكربتات والأوتوميشن
+
+تقدر تعمل **Action Group** من نوع `scene` أو `script` أو `automation`. مثال: تعمل زر واحد باسم **وضع المساء** وتضيف داخله عدة سيناريوهات؛ لما تضغط الزر تشغلهم كلهم. ونفس الفكرة للسكربتات. بالنسبة للأوتوميشن، النظام يستخدم `automation.trigger` حتى يشغّل الأكشنز نفسها، ومعك خيار هل يتجاوز شروط الأوتوميشن أو يحترمها. تقدر تختار تشغيل الأعضاء مع بعض **Parallel** أو واحد وراء الثاني **Sequential**، وكمان تقدر تربط زر حقيقي بالجروب.
+
+### الكبسات السريعة
+
+إذا كبست الزر الرئيسي أو أي زر فرعي بسرعة `تشغيل → إطفاء → تشغيل → إطفاء`، آخر حالة فعلية للزر اللي أنت كبسته هي المرجع. النظام يراقب المصدر لفترة قصيرة، ينتظر حتى تثبت حالته، وبعدها يعمل مزامنة نهائية لباقي المجموعة. الهدف إنه ما يضل زر ON والزر الرئيسي OFF بسبب تأخير Tuya أو وصول Echo قديم من السحابة.
+
 
 ## شو بتعمل الإضافة؟
 
@@ -744,7 +787,7 @@ fan.bedroom_fans
 binary_sensor
 button
 cover
- event
+event
 fan
 light
 lock
@@ -753,6 +796,9 @@ notify
 sensor
 switch
 valve
+scene       ← Action Group
+script      ← Action Group
+automation  ← Action Group
 ```
 
 لما تختار نوع الجروب، الأداة **بتفلتر لحالها** وبتعرضلك فقط الأجهزة المناسبة لنفس الـ domain.

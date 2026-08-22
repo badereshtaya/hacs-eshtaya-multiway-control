@@ -89,6 +89,9 @@
     },
     "test_smart_group": {
       "service": "mdi:test-tube"
+    },
+    "run_smart_group": {
+      "service": "mdi:play-circle-outline"
     }
   }
 }

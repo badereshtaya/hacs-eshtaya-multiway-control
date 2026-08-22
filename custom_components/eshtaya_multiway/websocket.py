@@ -22,6 +22,7 @@ from .const import (
     VIRTUAL_LIGHT,
     VIRTUAL_SWITCH,
     VERSION,
+    SMART_ACTION_TYPES,
     SMART_GROUP_TYPES,
     SMART_KIND_VIRTUAL,
     SMART_KINDS,
@@ -520,10 +521,22 @@ async def ws_smart_update(hass, connection, msg) -> None:
         group = await data["smart_store"].async_update(msg["group_id"], payload)
         old_type = (old or {}).get("group_type") or (old or {}).get("virtual_type")
         new_type = group.get("group_type") or group.get("virtual_type")
-        if old and old.get("kind") == SMART_KIND_VIRTUAL and (
-            group.get("kind") != SMART_KIND_VIRTUAL or old_type != new_type
-        ):
-            _remove_smart_control_registry_entity(hass, group["id"], old_type or VIRTUAL_LIGHT)
+        if old:
+            old_is_action = old_type in SMART_ACTION_TYPES
+            new_is_action = new_type in SMART_ACTION_TYPES
+            remove_old_control = False
+            if old_is_action:
+                # All Action Group domains intentionally share one persistent
+                # button control entity, even when a physical controller is added.
+                remove_old_control = not new_is_action
+            elif old.get("kind") == SMART_KIND_VIRTUAL:
+                remove_old_control = (
+                    group.get("kind") != SMART_KIND_VIRTUAL or old_type != new_type
+                )
+            if remove_old_control:
+                _remove_smart_control_registry_entity(
+                    hass, group["id"], old_type or VIRTUAL_LIGHT
+                )
         await data["smart_manager"].async_reload()
         connection.send_result(msg["id"], group)
     except Exception as err:  # noqa: BLE001
@@ -985,11 +998,15 @@ def _remove_smart_control_registry_entity(
 ) -> None:
     """Remove only the obsolete Smart Group control entity after a type change."""
     registry = er.async_get(hass)
-    try:
-        platform = Platform(group_type)
-    except ValueError:
-        return
-    unique_id = f"smart_{group_id}_control_{group_type}"
+    if group_type in SMART_ACTION_TYPES:
+        platform = Platform.BUTTON
+        unique_id = f"smart_{group_id}_control_action"
+    else:
+        try:
+            platform = Platform(group_type)
+        except ValueError:
+            return
+        unique_id = f"smart_{group_id}_control_{group_type}"
     entity_id = registry.async_get_entity_id(platform, DOMAIN, unique_id)
     if entity_id:
         registry.async_remove(entity_id)
@@ -997,16 +1014,25 @@ def _remove_smart_control_registry_entity(
 
 def _remove_smart_registry_entities(hass: HomeAssistant, group_id: str) -> None:
     registry = er.async_get(hass)
-    pairs = [
-        *((Platform(group_type), f"smart_{group_id}_control_{group_type}") for group_type in sorted(SMART_GROUP_TYPES)),
-        (Platform.SWITCH, f"smart_{group_id}_enabled"),
-        (Platform.SENSOR, f"smart_{group_id}_health"),
-        (Platform.SENSOR, f"smart_{group_id}_quality"),
-        (Platform.SENSOR, f"smart_{group_id}_last_source"),
-        (Platform.SENSOR, f"smart_{group_id}_last_latency"),
-        (Platform.BINARY_SENSOR, f"smart_{group_id}_healthy"),
-        (Platform.BUTTON, f"smart_{group_id}_sync"),
-    ]
+    pairs: list[tuple[Platform, str]] = []
+    for group_type in sorted(SMART_GROUP_TYPES - SMART_ACTION_TYPES):
+        try:
+            platform = Platform(group_type)
+        except ValueError:
+            continue
+        pairs.append((platform, f"smart_{group_id}_control_{group_type}"))
+    pairs.extend(
+        [
+            (Platform.BUTTON, f"smart_{group_id}_control_action"),
+            (Platform.SWITCH, f"smart_{group_id}_enabled"),
+            (Platform.SENSOR, f"smart_{group_id}_health"),
+            (Platform.SENSOR, f"smart_{group_id}_quality"),
+            (Platform.SENSOR, f"smart_{group_id}_last_source"),
+            (Platform.SENSOR, f"smart_{group_id}_last_latency"),
+            (Platform.BINARY_SENSOR, f"smart_{group_id}_healthy"),
+            (Platform.BUTTON, f"smart_{group_id}_sync"),
+        ]
+    )
     for platform, unique_id in pairs:
         entity_id = registry.async_get_entity_id(platform, DOMAIN, unique_id)
         if entity_id:

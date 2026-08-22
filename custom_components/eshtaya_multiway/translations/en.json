@@ -192,6 +192,16 @@
           "description": "Internal Smart Group ID."
         }
       }
+    },
+    "run_smart_group": {
+      "name": "Run Action Group",
+      "description": "Run every enabled member in a scene, script, or automation Action Group.",
+      "fields": {
+        "group_id": {
+          "name": "Group ID",
+          "description": "Internal Action Group ID."
+        }
+      }
     }
   },
   "exceptions": {

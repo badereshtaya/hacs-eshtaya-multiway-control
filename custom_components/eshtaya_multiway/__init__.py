@@ -22,6 +22,7 @@ from .const import (
     SERVICE_SYNC_ALL,
     SERVICE_SYNC_GROUP,
     SERVICE_TEST_GROUP,
+    SERVICE_SMART_RUN,
     SERVICE_SMART_SET_STATE,
     SERVICE_SMART_SYNC,
     SERVICE_SMART_TEST,
@@ -172,6 +173,20 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 translation_placeholders={"error": str(err)},
             ) from err
 
+
+    async def smart_run(call: ServiceCall) -> None:
+        runtime = _get_runtime(hass)
+        try:
+            await runtime["smart_manager"].async_run_action_group(
+                call.data["group_id"], source="service_action", origin="service"
+            )
+        except ValueError as err:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="group_error",
+                translation_placeholders={"error": str(err)},
+            ) from err
+
     async def smart_test(call: ServiceCall) -> dict[str, Any]:
         runtime = _get_runtime(hass)
         try:
@@ -183,6 +198,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             ) from err
 
     hass.services.async_register(DOMAIN, SERVICE_SMART_SET_STATE, smart_set_state, schema=STATE_SCHEMA)
+    hass.services.async_register(DOMAIN, SERVICE_SMART_RUN, smart_run, schema=GROUP_SCHEMA)
     hass.services.async_register(DOMAIN, SERVICE_SMART_SYNC, smart_sync, schema=GROUP_SCHEMA)
     hass.services.async_register(
         DOMAIN, SERVICE_SMART_TEST, smart_test, schema=GROUP_SCHEMA,
