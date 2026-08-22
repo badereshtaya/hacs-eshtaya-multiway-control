@@ -77,6 +77,7 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
         ws_export,
         ws_import,
         ws_test,
+        ws_test_entity_action,
     ):
         websocket_api.async_register_command(hass, command)
 
@@ -303,6 +304,25 @@ def ws_test(hass, connection, msg) -> None:
         connection.send_result(msg["id"], manager.test_group(msg["group_id"]))
     except Exception as err:  # noqa: BLE001
         connection.send_error(msg["id"], "test_failed", str(err))
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/test_entity_action",
+        vol.Required("group_id"): str,
+        vol.Required("entity_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_test_entity_action(hass, connection, msg) -> None:
+    """Exercise one group member in isolation from normal multi-way propagation."""
+    try:
+        _, manager = _runtime(hass)
+        result = await manager.async_test_entity_action(msg["group_id"], msg["entity_id"])
+        connection.send_result(msg["id"], result)
+    except Exception as err:  # noqa: BLE001
+        connection.send_error(msg["id"], "test_entity_failed", str(err))
 
 
 def _remove_virtual_registry_entity(hass: HomeAssistant, group_id: str, virtual_type: str) -> None:

@@ -5,7 +5,7 @@ from typing import Final
 
 DOMAIN: Final = "eshtaya_multiway"
 NAME: Final = "Eshtaya Multi-Way Control"
-VERSION: Final = "2.0.0"
+VERSION: Final = "2.1.0"
 MANUFACTURER: Final = "Eshtaya Smart"
 MODEL: Final = "Virtual Multi-Way Group"
 
@@ -39,6 +39,16 @@ CONTROLLER_DOMAINS: Final = {
     "event",
 }
 COMMANDABLE_DOMAINS: Final = {"switch", "light", "input_boolean", "fan"}
+PRESSABLE_DOMAINS: Final = {"button", "input_button"}
+
+PERFORMANCE_INSTANT: Final = "instant"
+PERFORMANCE_BALANCED: Final = "balanced"
+PERFORMANCE_SAFE: Final = "safe"
+PERFORMANCE_MODES: Final = {
+    PERFORMANCE_INSTANT,
+    PERFORMANCE_BALANCED,
+    PERFORMANCE_SAFE,
+}
 
 MODE_MIRROR: Final = "mirror"
 MODE_TOGGLE: Final = "toggle"
@@ -78,7 +88,8 @@ DEFAULT_SETTINGS: Final = {
 }
 
 DEFAULT_BEHAVIOR: Final = {
-    "debounce_ms": 180,
+    "debounce_ms": 120,
+    "performance_mode": PERFORMANCE_INSTANT,
     "auto_heal": True,
     "output_restore_policy": "adopt",
     "confirm_output": None,

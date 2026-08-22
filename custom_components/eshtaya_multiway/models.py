@@ -38,6 +38,8 @@ class GroupRuntime:
     recovering: bool = False
     pending: dict[str, PendingCommand] = field(default_factory=dict)
     last_input_time: dict[str, float] = field(default_factory=dict)
+    suppressed_until: dict[str, float] = field(default_factory=dict)
+    test_mode_until: float = 0.0
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize public runtime state."""

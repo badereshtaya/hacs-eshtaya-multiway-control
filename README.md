@@ -140,6 +140,15 @@ eshtaya_multiway.test_group
 
 State reflection is only available for commandable controller domains.
 
+
+## v2.1 performance and UX
+
+- Draft-safe group editor: live runtime updates never reset an open form.
+- Isolated Test Center with per-device Toggle/Press controls and one-click re-sync.
+- Three response profiles: **Instant** (default), **Balanced**, and **Safe**.
+- Instant mode dispatches the output and followers without blocking, then verifies the physical output in the background with stale-transaction protection and rollback.
+- Cleaner group cards show the active response profile.
+
 ## Installation with HACS
 
 1. Open **HACS**.

@@ -54,3 +54,19 @@ def test_future_storage_schema_is_refused():
     store = MultiWayStore.__new__(MultiWayStore)
     with pytest.raises(ValueError, match="newer than supported"):
         store._migrate({"schema_version": SCHEMA_VERSION + 1, "groups": []})
+
+
+def test_performance_mode_default():
+    """Legacy/current groups without performance_mode normalize to instant."""
+    store = MultiWayStore.__new__(MultiWayStore)
+    group = store._normalize_group(  # noqa: SLF001
+        {
+            "id": "g1",
+            "name": "Living",
+            "output": "switch.main",
+            "controllers": [{"entity_id": "switch.secondary", "mode": MODE_MIRROR}],
+            "behavior": {},
+        },
+        keep_id=True,
+    )
+    assert group["behavior"]["performance_mode"] == "instant"

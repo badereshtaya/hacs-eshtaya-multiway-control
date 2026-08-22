@@ -19,6 +19,7 @@ from .const import (
     MODE_FOLLOW,
     MODE_MIRROR,
     OUTPUT_DOMAINS,
+    PERFORMANCE_MODES,
     SCHEMA_VERSION,
     STORAGE_KEY,
     STORAGE_VERSION,
@@ -391,11 +392,13 @@ class MultiWayStore:
             raise ValueError("A controller can only be added once per group")
 
         behavior = group["behavior"]
-        debounce = int(behavior.get("debounce_ms", 180))
+        debounce = int(behavior.get("debounce_ms", 120))
         if not 0 <= debounce <= 5000:
             raise ValueError("debounce_ms must be between 0 and 5000")
         if behavior.get("output_restore_policy") not in {"adopt", "enforce"}:
             raise ValueError("output_restore_policy must be adopt or enforce")
+        if behavior.get("performance_mode") not in PERFORMANCE_MODES:
+            raise ValueError("performance_mode must be instant, balanced, or safe")
         for key in ("command_timeout", "max_retries"):
             value = behavior.get(key)
             if value is not None and float(value) < 0:

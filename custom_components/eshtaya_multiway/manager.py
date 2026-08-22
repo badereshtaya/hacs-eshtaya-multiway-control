@@ -36,6 +36,10 @@ from .const import (
     MODE_MOMENTARY_OFF,
     MODE_MOMENTARY_ON,
     MODE_TOGGLE,
+    PERFORMANCE_BALANCED,
+    PERFORMANCE_INSTANT,
+    PERFORMANCE_SAFE,
+    PRESSABLE_DOMAINS,
     SIGNAL_GROUPS_UPDATED,
     SIGNAL_RUNTIME_UPDATED,
     UNAVAILABLE_STATES,
@@ -71,6 +75,7 @@ class MultiWayManager:
         self._startup_unsub = None
         self._started = False
         self._ready = False
+        self._verification_tasks: set[asyncio.Task] = set()
 
     async def async_start(self) -> None:
         """Start listeners and delayed startup reconciliation."""
@@ -95,12 +100,19 @@ class MultiWayManager:
         """Stop all listeners and flush state."""
         self._started = False
         self._ready = False
+        self._verification_tasks: set[asyncio.Task] = set()
         for unsub in (self._state_unsub, self._watchdog_unsub, self._startup_unsub):
             if unsub:
                 unsub()
         self._state_unsub = None
         self._watchdog_unsub = None
         self._startup_unsub = None
+        tasks = list(self._verification_tasks)
+        self._verification_tasks.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         await self.store.async_close()
 
     @callback
@@ -235,6 +247,12 @@ class MultiWayManager:
         if pending and new.state != pending.expected_state:
             runtime.pending.pop(entity_id, None)
 
+        self._cleanup_suppressed(runtime)
+        if runtime.suppressed_until.get(entity_id, 0.0) > monotonic():
+            self._update_health(group_id)
+            self._notify(group_id)
+            return
+
         old_state = old.state if old else None
         new_state = new.state
         if old_state == new_state and self._controller_mode(group, entity_id) != MODE_EVENT:
@@ -356,8 +374,13 @@ class MultiWayManager:
         txid = self._txid()
         runtime.last_transaction_id = txid
         started = monotonic()
+        performance = self._performance_mode(group)
         results = await self._async_sync_controllers(
-            group, state, transaction_id=txid, wait=True
+            group,
+            state,
+            transaction_id=txid,
+            wait=performance == PERFORMANCE_SAFE,
+            blocking=performance == PERFORMANCE_SAFE,
         )
         runtime.last_latency_ms = int((monotonic() - started) * 1000)
         self._add_activity(
@@ -380,7 +403,7 @@ class MultiWayManager:
         source: str = "virtual",
         origin: str = "service",
     ) -> bool:
-        """Request a state transaction, confirming output first then followers."""
+        """Request a state transaction using the configured performance profile."""
         if state not in VALID_STATES:
             raise ValueError("State must be on or off")
         group = self._groups.get(group_id)
@@ -393,46 +416,89 @@ class MultiWayManager:
             runtime = self._runtime[group_id]
             txid = self._txid()
             started = monotonic()
+            performance = self._performance_mode(group)
+            confirm = self._confirm_output(group)
+
             runtime.last_transaction_id = txid
             runtime.last_source = source
             runtime.last_action = state
             runtime.last_changed = _utcnow()
             runtime.last_error = None
-            self._notify(group_id)
 
-            output_ok = await self._async_command_output(
-                group, state, transaction_id=txid
-            )
-            if not output_ok:
-                runtime.consecutive_output_failures += 1
-                runtime.last_error = f"Output {group['output']} did not confirm {state}"
-                output_state = self.hass.states.get(group["output"])
-                if output_state and output_state.state in VALID_STATES:
-                    runtime.desired_state = output_state.state
-                    self.store.set_last_state(group_id, output_state.state)
+            # Instant mode is optimistic by design: publish the desired state and
+            # dispatch the physical output immediately. A version-aware background
+            # verifier confirms/retries it without holding the group lock.
+            if performance == PERFORMANCE_INSTANT:
+                runtime.desired_state = state
+                self.store.set_last_state(group_id, state)
+                self._notify(group_id)
+
+                output_ok = await self._async_command_output(
+                    group,
+                    state,
+                    transaction_id=txid,
+                    wait_override=False,
+                    blocking=False,
+                )
+                if not output_ok:
+                    return self._record_immediate_output_failure(
+                        group, runtime, txid, state, source, origin, started
+                    )
+
+                controller_results = await self._async_sync_controllers(
+                    group,
+                    state,
+                    transaction_id=txid,
+                    wait=False,
+                    blocking=False,
+                )
                 runtime.last_latency_ms = int((monotonic() - started) * 1000)
                 self._add_activity(
                     group_id=group_id,
                     transaction_id=txid,
                     source=source,
-                    event="transaction",
+                    event="transaction_dispatched",
                     action=state,
-                    result="failed",
+                    result="success" if all(controller_results) else "partial",
                     latency_ms=runtime.last_latency_ms,
-                    message=runtime.last_error,
                     origin=origin,
+                    message="Instant dispatch; output verification continues in background"
+                    if confirm
+                    else "Instant dispatch without output confirmation",
                 )
                 self._update_health(group_id)
-                self._refresh_repairs_for_group(group_id)
                 self._notify(group_id)
-                return False
+                if confirm:
+                    self._schedule_fast_verification(group_id, state, txid, source, origin)
+                return all(controller_results)
+
+            # Balanced: dispatch output without blocking the service handler, but
+            # confirm the physical state before updating followers. Safe: preserve
+            # the fully blocking/confirmed behavior for maximum determinism.
+            self._notify(group_id)
+            safe = performance == PERFORMANCE_SAFE
+            output_ok = await self._async_command_output(
+                group,
+                state,
+                transaction_id=txid,
+                wait_override=confirm,
+                blocking=safe,
+            )
+            if not output_ok:
+                return self._record_immediate_output_failure(
+                    group, runtime, txid, state, source, origin, started
+                )
 
             runtime.consecutive_output_failures = 0
             runtime.desired_state = state
             self.store.set_last_state(group_id, state)
             self._delete_issue(f"output_unresponsive_{group_id}")
             controller_results = await self._async_sync_controllers(
-                group, state, transaction_id=txid, wait=True
+                group,
+                state,
+                transaction_id=txid,
+                wait=safe,
+                blocking=safe,
             )
             runtime.last_latency_ms = int((monotonic() - started) * 1000)
             success = all(controller_results)
@@ -454,8 +520,121 @@ class MultiWayManager:
             self._notify(group_id)
             return success
 
+    def _record_immediate_output_failure(
+        self,
+        group: dict[str, Any],
+        runtime: GroupRuntime,
+        txid: str,
+        state: str,
+        source: str,
+        origin: str,
+        started: float,
+    ) -> bool:
+        group_id = group["id"]
+        runtime.consecutive_output_failures += 1
+        runtime.last_error = f"Output {group['output']} could not accept {state}"
+        output_state = self.hass.states.get(group["output"])
+        if output_state and output_state.state in VALID_STATES:
+            runtime.desired_state = output_state.state
+            self.store.set_last_state(group_id, output_state.state)
+        runtime.last_latency_ms = int((monotonic() - started) * 1000)
+        self._add_activity(
+            group_id=group_id,
+            transaction_id=txid,
+            source=source,
+            event="transaction",
+            action=state,
+            result="failed",
+            latency_ms=runtime.last_latency_ms,
+            message=runtime.last_error,
+            origin=origin,
+        )
+        self._update_health(group_id)
+        self._refresh_repairs_for_group(group_id)
+        self._notify(group_id)
+        return False
+
+    def _schedule_fast_verification(
+        self, group_id: str, state: str, txid: str, source: str, origin: str
+    ) -> None:
+        task = self.hass.async_create_task(
+            self._async_verify_fast_transaction(group_id, state, txid, source, origin)
+        )
+        self._verification_tasks.add(task)
+        task.add_done_callback(self._verification_tasks.discard)
+
+    async def _async_verify_fast_transaction(
+        self, group_id: str, state: str, txid: str, source: str, origin: str
+    ) -> None:
+        group = self._groups.get(group_id)
+        runtime = self._runtime.get(group_id)
+        if not group or not runtime:
+            return
+        timeout = self._group_timeout(group)
+        confirmed = await self._async_wait_for_state(group["output"], state, timeout)
+        if runtime.last_transaction_id != txid or runtime.desired_state != state:
+            return
+        if not confirmed:
+            confirmed = await self._async_command_entity(
+                group["output"],
+                state,
+                transaction_id=txid,
+                wait=True,
+                timeout=timeout,
+                retries=self._group_retries(group),
+                blocking=False,
+            )
+        if runtime.last_transaction_id != txid or runtime.desired_state != state:
+            return
+        if confirmed:
+            runtime.consecutive_output_failures = 0
+            runtime.last_error = None
+            self._delete_issue(f"output_unresponsive_{group_id}")
+            self._add_activity(
+                group_id=group_id,
+                transaction_id=txid,
+                source=source,
+                event="output_confirmed",
+                action=state,
+                result="success",
+                origin=origin,
+            )
+        else:
+            runtime.consecutive_output_failures += 1
+            runtime.last_error = f"Output {group['output']} did not confirm {state}"
+            actual = self.hass.states.get(group["output"])
+            if actual and actual.state in VALID_STATES:
+                runtime.desired_state = actual.state
+                self.store.set_last_state(group_id, actual.state)
+                await self._async_sync_controllers(
+                    group,
+                    actual.state,
+                    transaction_id=f"rollback_{txid}",
+                    wait=False,
+                    blocking=False,
+                )
+            self._add_activity(
+                group_id=group_id,
+                transaction_id=txid,
+                source=source,
+                event="output_confirmation_failed",
+                action=state,
+                result="failed",
+                message=runtime.last_error,
+                origin=origin,
+            )
+        self._update_health(group_id)
+        self._refresh_repairs_for_group(group_id)
+        self._notify(group_id)
+
     async def _async_command_output(
-        self, group: dict[str, Any], state: str, *, transaction_id: str
+        self,
+        group: dict[str, Any],
+        state: str,
+        *,
+        transaction_id: str,
+        wait_override: bool | None = None,
+        blocking: bool = False,
     ) -> bool:
         output = group["output"]
         current = self.hass.states.get(output)
@@ -464,11 +643,7 @@ class MultiWayManager:
         if current is None or current.state in UNAVAILABLE_STATES:
             return False
 
-        behavior = group["behavior"]
-        settings = self.store.settings()
-        confirm = behavior.get("confirm_output")
-        if confirm is None:
-            confirm = settings["confirm_output"]
+        confirm = self._confirm_output(group) if wait_override is None else wait_override
         return await self._async_command_entity(
             output,
             state,
@@ -476,6 +651,7 @@ class MultiWayManager:
             wait=bool(confirm),
             timeout=self._group_timeout(group),
             retries=self._group_retries(group),
+            blocking=blocking,
         )
 
     async def _async_sync_controllers(
@@ -485,6 +661,7 @@ class MultiWayManager:
         *,
         transaction_id: str,
         wait: bool,
+        blocking: bool = False,
     ) -> list[bool]:
         tasks = []
         for controller in group["controllers"]:
@@ -497,6 +674,7 @@ class MultiWayManager:
                     state,
                     transaction_id=transaction_id,
                     wait=wait,
+                    blocking=blocking,
                 )
             )
         if not tasks:
@@ -511,6 +689,7 @@ class MultiWayManager:
         *,
         transaction_id: str,
         wait: bool,
+        blocking: bool = False,
     ) -> bool:
         entity_id = controller["entity_id"]
         target = self._group_to_controller_state(controller, state)
@@ -521,6 +700,7 @@ class MultiWayManager:
             wait=wait,
             timeout=self._group_timeout(group),
             retries=self._group_retries(group),
+            blocking=blocking,
         )
 
     async def _async_command_entity(
@@ -532,6 +712,7 @@ class MultiWayManager:
         wait: bool,
         timeout: float,
         retries: int,
+        blocking: bool = False,
     ) -> bool:
         current = self.hass.states.get(entity_id)
         if current is None or current.state in UNAVAILABLE_STATES:
@@ -558,7 +739,7 @@ class MultiWayManager:
                     domain,
                     service,
                     {ATTR_ENTITY_ID: entity_id},
-                    blocking=True,
+                    blocking=blocking,
                 )
                 if not wait:
                     return True
@@ -606,6 +787,10 @@ class MultiWayManager:
 
     async def async_sync_group(self, group_id: str) -> bool:
         """Synchronize a group using the physical output as authority when available."""
+        runtime = self._runtime.get(group_id)
+        if runtime:
+            runtime.test_mode_until = 0.0
+            runtime.suppressed_until.clear()
         group = self._groups.get(group_id)
         if not group:
             raise ValueError("Group not found")
@@ -663,13 +848,20 @@ class MultiWayManager:
         ]:
             state = self.hass.states.get(entity_id)
             domain = entity_id.split(".", 1)[0]
+            action = None
+            if domain in COMMANDABLE_DOMAINS and state and state.state in VALID_STATES:
+                action = "toggle"
+            elif domain in PRESSABLE_DOMAINS:
+                action = "press"
             entities.append(
                 {
                     "entity_id": entity_id,
                     "role": role,
+                    "domain": domain,
                     "exists": state is not None,
                     "state": state.state if state else "missing",
-                    "commandable": domain in COMMANDABLE_DOMAINS,
+                    "commandable": action is not None,
+                    "test_action": action,
                 }
             )
         return {
@@ -677,6 +869,79 @@ class MultiWayManager:
             "name": group["name"],
             "health": self.status(group_id)["health"],
             "entities": entities,
+        }
+
+    async def async_test_entity_action(
+        self, group_id: str, entity_id: str
+    ) -> dict[str, Any]:
+        """Exercise one group member without letting the test propagate through the group."""
+        group = self._groups.get(group_id)
+        if not group:
+            raise ValueError("Group not found")
+        members = {group["output"], *(c["entity_id"] for c in group["controllers"])}
+        if entity_id not in members:
+            raise ValueError("Entity does not belong to this group")
+        current = self.hass.states.get(entity_id)
+        if current is None or current.state in UNAVAILABLE_STATES:
+            raise ValueError("Entity is missing or unavailable")
+
+        domain = entity_id.split(".", 1)[0]
+        runtime = self._runtime[group_id]
+        timeout = min(self._group_timeout(group), 4.0)
+        runtime.suppressed_until[entity_id] = monotonic() + timeout + 3.0
+        runtime.test_mode_until = max(runtime.test_mode_until, monotonic() + 30.0)
+        started = monotonic()
+        txid = f"test_{self._txid()}"
+        target: str | None = None
+        action: str
+
+        if domain in COMMANDABLE_DOMAINS:
+            if current.state not in VALID_STATES:
+                raise ValueError("Entity does not expose an ON/OFF state")
+            target = _invert_state(current.state)
+            action = "toggle"
+            ok = await self._async_command_entity(
+                entity_id,
+                target,
+                transaction_id=txid,
+                wait=True,
+                timeout=timeout,
+                retries=0,
+                blocking=False,
+            )
+        elif domain in PRESSABLE_DOMAINS:
+            action = "press"
+            await self.hass.services.async_call(
+                domain,
+                "press",
+                {ATTR_ENTITY_ID: entity_id},
+                blocking=False,
+            )
+            ok = True
+        else:
+            raise ValueError("This entity is read-only and cannot be exercised")
+
+        latency_ms = int((monotonic() - started) * 1000)
+        self._add_activity(
+            group_id=group_id,
+            transaction_id=txid,
+            source=entity_id,
+            event="isolated_test",
+            action=target or action,
+            result="success" if ok else "failed",
+            latency_ms=latency_ms,
+            origin="test_center",
+            message="Isolated device test; group propagation suppressed",
+        )
+        self._update_health(group_id)
+        self._notify(group_id)
+        return {
+            "ok": ok,
+            "entity_id": entity_id,
+            "action": action,
+            "target": target,
+            "latency_ms": latency_ms,
+            "group": self.test_group(group_id),
         }
 
     @callback
@@ -692,6 +957,10 @@ class MultiWayManager:
                 continue
             runtime = self._runtime[group_id]
             self._cleanup_pending(runtime)
+            self._cleanup_suppressed(runtime)
+            if runtime.test_mode_until > monotonic():
+                continue
+            runtime.test_mode_until = 0.0
             self._update_health(group_id)
             if not group["behavior"].get("auto_heal", True):
                 continue
@@ -939,8 +1208,28 @@ class MultiWayManager:
             runtime.pending.pop(entity_id, None)
 
     @staticmethod
+    def _cleanup_suppressed(runtime: GroupRuntime) -> None:
+        now = monotonic()
+        expired = [entity_id for entity_id, until in runtime.suppressed_until.items() if until <= now]
+        for entity_id in expired:
+            runtime.suppressed_until.pop(entity_id, None)
+
+    @staticmethod
     def _txid() -> str:
         return uuid4().hex[:10]
+
+    def _performance_mode(self, group: dict[str, Any]) -> str:
+        value = group.get("behavior", {}).get("performance_mode", PERFORMANCE_INSTANT)
+        if value not in {PERFORMANCE_INSTANT, PERFORMANCE_BALANCED, PERFORMANCE_SAFE}:
+            return PERFORMANCE_INSTANT
+        return value
+
+    def _confirm_output(self, group: dict[str, Any]) -> bool:
+        behavior = group["behavior"]
+        value = behavior.get("confirm_output")
+        if value is None:
+            value = self.store.settings()["confirm_output"]
+        return bool(value)
 
     def _group_timeout(self, group: dict[str, Any]) -> float:
         value = group["behavior"].get("command_timeout")
@@ -956,7 +1245,7 @@ class MultiWayManager:
 
     @staticmethod
     def _debounced(group: dict[str, Any], runtime: GroupRuntime, entity_id: str) -> bool:
-        debounce = max(0, int(group["behavior"].get("debounce_ms", 180))) / 1000
+        debounce = max(0, int(group["behavior"].get("debounce_ms", 120))) / 1000
         now = monotonic()
         previous = runtime.last_input_time.get(entity_id, 0.0)
         runtime.last_input_time[entity_id] = now
