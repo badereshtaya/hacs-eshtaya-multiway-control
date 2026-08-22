@@ -37,3 +37,13 @@ jobs:
         with:
           version: "0.16.4"
           args: check
+  frontend:
+    name: Frontend smoke tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check JavaScript syntax
+        run: node --check custom_components/eshtaya_multiway/frontend/panel.js
+      - name: Run frontend runtime smoke tests
+        run: node tests/frontend_smoke.mjs
+
