@@ -1,0 +1,4 @@
+{
+  "tests/test_config_flow.py": true,
+  "tests/test_storage_migration.py": true
+}
