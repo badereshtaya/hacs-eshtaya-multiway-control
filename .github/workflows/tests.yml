@@ -21,6 +21,32 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-homeassistant-custom-component==0.13.356
+          python -m pip install pytest pytest-homeassistant-custom-component==0.13.356
+
+      - name: Install Home Assistant frontend requirement
+        shell: bash
+        run: |
+          FRONTEND_REQUIREMENT="$(python - <<'PYREQ'
+          import json
+          from pathlib import Path
+
+          import homeassistant
+
+          manifest_path = (
+              Path(homeassistant.__file__).resolve().parent
+              / "components"
+              / "frontend"
+              / "manifest.json"
+          )
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          requirements = manifest.get("requirements", [])
+          if not requirements:
+              raise SystemExit("Home Assistant frontend manifest has no requirements")
+          print(requirements[0])
+          PYREQ
+          )"
+          echo "Installing ${FRONTEND_REQUIREMENT}"
+          python -m pip install "${FRONTEND_REQUIREMENT}"
+
       - name: Run tests
         run: python -m pytest -q
