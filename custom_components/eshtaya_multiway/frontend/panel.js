@@ -262,7 +262,7 @@ class EshtayaMultiWayPanel extends HTMLElement {
       <style>${this._styles()}.native-groups-card{margin-top:18px}.native-title-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.native-readonly{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;border:1px solid var(--divider-color);border-radius:999px;padding:4px 7px;color:var(--secondary-text-color)}.native-main{min-width:0}.native-main code{display:block;margin-top:4px;font-size:10px;overflow:hidden;text-overflow:ellipsis}.compact-empty{padding:38px 20px;margin-bottom:18px}</style>
       <main class="app" dir="${rtl ? "rtl" : "ltr"}">
         <header class="hero control-hero">
-          <div><div class="eyebrow">ESHTAYA SMART · v${this.esc(this._data.version || "3.2.0")}</div><h1>${this.t("controlCenter")}</h1><p>${this.t("subtitle")}</p></div>
+          <div><div class="eyebrow">ESHTAYA SMART · v${this.esc(this._data.version || "3.2.1")}</div><h1>${this.t("controlCenter")}</h1><p>${this.t("subtitle")}</p></div>
           <div class="hero-actions">
             <button class="secondary" data-action="refresh"><ha-icon icon="mdi:refresh"></ha-icon>${this.t("refresh")}</button>
             <button class="secondary" data-action="full-test"><ha-icon icon="mdi:clipboard-check-outline"></ha-icon>${this.t("fullTest")}</button>
@@ -312,7 +312,7 @@ class EshtayaMultiWayPanel extends HTMLElement {
     const ms=this._data.summary||{}, ss=this._smart.summary||{};
     return `<div class="dashboard-grid">
       <section class="dash-main settings-card">
-        <div class="section-head"><div><h2>${this.t("controlCenter")}</h2><p>${this._smart.settings?.project_name?this.esc(this._smart.settings.project_name):"Eshtaya Smart"}</p></div><span class="version-chip">v${this.esc(this._data.version||"3.2.0")}</span></div>
+        <div class="section-head"><div><h2>${this.t("controlCenter")}</h2><p>${this._smart.settings?.project_name?this.esc(this._smart.settings.project_name):"Eshtaya Smart"}</p></div><span class="version-chip">v${this.esc(this._data.version||"3.2.1")}</span></div>
         <div class="quick-grid">
           <button class="quick-card" data-action="add"><ha-icon icon="mdi:electric-switch"></ha-icon><b>${this.t("addMulti")}</b><small>${ms.groups||0} ${this.t("groups")}</small></button>
           <button class="quick-card" data-action="smart-add"><ha-icon icon="mdi:lightbulb-group"></ha-icon><b>${this.t("addSmart")}</b><small>${ss.groups||0} ${this.t("groups")}</small></button>

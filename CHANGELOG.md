@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.2.1 - 2026-08-22
+
+### Fixed
+
+- Infer the Smart Group domain from the first member for legacy or incomplete payloads instead of incorrectly defaulting them to `light`.
+- Preserve the more specific physical-controller/member validation when a physical controller is also listed as a member.
+- Harden the global cloud-echo guard so isolated tests and partial recovery paths cannot fail when pending expectation/context maps have not been initialized.
+- Added regression coverage for legacy group-type inference and the cross-group echo guard.
+
+
 ## 3.2.0 - 2026-08-22
 
 ### Domain-native Smart Groups

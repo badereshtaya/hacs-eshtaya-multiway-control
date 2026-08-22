@@ -47,6 +47,24 @@ def test_physical_button_controller_becomes_event_mode() -> None:
     assert group["behavior"]["controller_mode"] == MODE_EVENT
 
 
+
+
+def test_group_type_is_inferred_from_first_member_for_legacy_payloads() -> None:
+    """Legacy Smart Group payloads without a type infer it from their members."""
+    store = SmartGroupStore.__new__(SmartGroupStore)
+    group = store._normalize(  # noqa: SLF001
+        {
+            "name": "Legacy Switch Group",
+            "kind": SMART_KIND_VIRTUAL,
+            "members": [{"entity_id": "switch.one"}],
+        },
+        keep_id=False,
+    )
+    assert group["group_type"] == "switch"
+    assert group["virtual_type"] == "switch"
+    store._validate(group)  # noqa: SLF001
+
+
 def test_physical_controller_cannot_be_group_member() -> None:
     """A physical controller cannot simultaneously be a controlled member."""
     store = SmartGroupStore.__new__(SmartGroupStore)

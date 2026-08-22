@@ -13,7 +13,7 @@ No YAML automations are required. The integration coordinates entities that alre
 
 > Domain: `eshtaya_multiway`  
 > Repository: `badereshtaya/hacs-eshtaya-multiway-control`  
-> Current release: **3.2.0**
+> Current release: **3.2.1**
 
 ## Requirements
 
@@ -240,7 +240,7 @@ remains available as an explicit Advanced opt-in.
 
 ## Updating
 
-Releases are versioned with Git tags such as `v3.2.0`. HACS discovers the published GitHub Release and offers it as an update.
+Releases are versioned with Git tags such as `v3.2.1`. HACS discovers the published GitHub Release and offers it as an update.
 
 ## Repository validation
 

@@ -1250,11 +1250,20 @@ class SmartGroupManager:
         # so a later same-state physical transition is not swallowed by the old
         # command, even when the cloud integration lost the original Context.
         self._global_expected.pop(entity_id, None)
-        for key in [key for key in self._pending_expected if key[1] == entity_id]:
-            self._pending_expected.pop(key, None)
-        for context_id, pending in list(self._pending_contexts.items()):
-            if pending[1] == entity_id:
-                self._pending_contexts.pop(context_id, None)
+
+        # These maps always exist on a normally initialized manager, but keep
+        # this helper defensive so isolated unit tests and recovery paths cannot
+        # fail just because the manager was constructed without __init__.
+        pending_expected = getattr(self, "_pending_expected", None)
+        if pending_expected is not None:
+            for key in [key for key in pending_expected if key[1] == entity_id]:
+                pending_expected.pop(key, None)
+
+        pending_contexts = getattr(self, "_pending_contexts", None)
+        if pending_contexts is not None:
+            for context_id, pending in list(pending_contexts.items()):
+                if pending[1] == entity_id:
+                    pending_contexts.pop(context_id, None)
         return False
 
     def _consume_expected_echo(

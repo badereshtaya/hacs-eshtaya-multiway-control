@@ -407,23 +407,23 @@ class SmartGroupStore:
                         "enabled": bool(item.get("enabled", True)) if isinstance(item, dict) else True,
                     }
                 )
+        explicit_group_type = payload.get("group_type") or payload.get("virtual_type")
+        inferred_group_type = (
+            self._domain(members[0]["entity_id"])
+            if members
+            else None
+        )
+        group_type = str(explicit_group_type or inferred_group_type or VIRTUAL_LIGHT).strip()
+
         return {
             "id": payload.get("id") if keep_id else uuid4().hex,
             "name": str(payload.get("name", "")).strip(),
             "kind": kind,
             "controller_entity": str(controller).strip() if controller else None,
             "members": members,
-            "group_type": str(
-                payload.get("group_type")
-                or payload.get("virtual_type")
-                or VIRTUAL_LIGHT
-            ).strip(),
+            "group_type": group_type,
             # Kept as a compatibility alias for V2/V3 backups and old UI caches.
-            "virtual_type": str(
-                payload.get("group_type")
-                or payload.get("virtual_type")
-                or VIRTUAL_LIGHT
-            ).strip(),
+            "virtual_type": group_type,
             "area_id": payload.get("area_id") or None,
             "enabled": bool(payload.get("enabled", True)),
             "maintenance": bool(payload.get("maintenance", False)),
