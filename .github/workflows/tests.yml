@@ -11,42 +11,57 @@ permissions:
 
 jobs:
   pytest:
+    name: Pytest (Home Assistant 2026.8.2)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v6
         with:
           python-version: "3.14"
           cache: pip
-      - name: Install test dependencies
+          cache-dependency-path: requirements-test.txt
+
+      - name: Install test environment
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest pytest-homeassistant-custom-component==0.13.356
+          python -m pip install --requirement requirements-test.txt
 
-      - name: Install Home Assistant frontend requirement
-        shell: bash
+      - name: Verify Home Assistant test environment
         run: |
-          FRONTEND_REQUIREMENT="$(python - <<'PYREQ'
-          import json
-          from pathlib import Path
+          python - <<'PY'
+          from importlib.metadata import version
 
+          import hass_frontend
           import homeassistant
 
-          manifest_path = (
-              Path(homeassistant.__file__).resolve().parent
-              / "components"
-              / "frontend"
-              / "manifest.json"
+          expected = {
+              "homeassistant": "2026.8.2",
+              "home-assistant-frontend": "20260729.7",
+              "pytest-homeassistant-custom-component": "0.13.356",
+          }
+          actual = {package: version(package) for package in expected}
+
+          for package, expected_version in expected.items():
+              actual_version = actual[package]
+              if actual_version != expected_version:
+                  raise SystemExit(
+                      f"{package}: expected {expected_version}, got {actual_version}"
+                  )
+
+          print(f"Home Assistant: {actual['homeassistant']}")
+          print(f"Home Assistant frontend: {actual['home-assistant-frontend']}")
+          print(
+              "pytest-homeassistant-custom-component: "
+              f"{actual['pytest-homeassistant-custom-component']}"
           )
-          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-          requirements = manifest.get("requirements", [])
-          if not requirements:
-              raise SystemExit("Home Assistant frontend manifest has no requirements")
-          print(requirements[0])
-          PYREQ
-          )"
-          echo "Installing ${FRONTEND_REQUIREMENT}"
-          python -m pip install "${FRONTEND_REQUIREMENT}"
+          print(f"hass_frontend module: {hass_frontend.__file__}")
+          print(f"homeassistant module: {homeassistant.__file__}")
+          PY
 
       - name: Run tests
         run: python -m pytest -q
