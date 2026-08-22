@@ -7,6 +7,8 @@
 
 ## 2.0.0 - 2026-08-22
 
+- Pin the CI Home Assistant frontend package to the exact version required by HA 2026.8.2 and verify `hass_frontend` before running tests.
+
 ### Added
 
 - Established the clean integration domain `eshtaya_multiway` for the first public release.

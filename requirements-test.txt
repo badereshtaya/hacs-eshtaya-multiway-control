@@ -1,0 +1,5 @@
+# Test environment pinned to Home Assistant 2026.8.2.
+# pytest-homeassistant-custom-component 0.13.356 is generated from HA 2026.8.2.
+pytest-homeassistant-custom-component==0.13.356
+# Home Assistant Core's frontend manifest for 2026.8.2 requires this exact build.
+home-assistant-frontend==20260729.7
