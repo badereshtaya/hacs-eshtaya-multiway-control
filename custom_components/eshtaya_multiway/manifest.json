@@ -7,6 +7,7 @@
   "config_flow": true,
   "dependencies": [
     "frontend",
+    "group",
     "http",
     "panel_custom"
   ],
@@ -16,5 +17,5 @@
   "issue_tracker": "https://github.com/badereshtaya/hacs-eshtaya-multiway-control/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "3.1.0"
+  "version": "3.2.0"
 }

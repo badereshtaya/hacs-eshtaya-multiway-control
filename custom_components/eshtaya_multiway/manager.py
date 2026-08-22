@@ -1593,13 +1593,22 @@ class MultiWayManager:
         except asyncio.CancelledError:
             return
 
-    def start_learn(self, role: str, timeout: float = 12.0) -> dict[str, Any]:
+    def start_learn(
+        self,
+        role: str,
+        timeout: float = 12.0,
+        allowed_domains: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Start a temporary entity-learning session."""
         if role not in {"output", "controller"}:
             raise ValueError("Invalid learn role")
-        allowed = {"switch", "light", "input_boolean", "fan"} if role == "output" else {
+        default_allowed = {"switch", "light", "input_boolean", "fan"} if role == "output" else {
             "switch", "light", "input_boolean", "binary_sensor", "button", "input_button", "event"
         }
+        allowed = set(allowed_domains or default_allowed)
+        allowed.discard("")
+        if not allowed:
+            raise ValueError("At least one learn domain is required")
         registry = er.async_get(self.hass)
         entity_ids = []
         for state in self.hass.states.async_all():

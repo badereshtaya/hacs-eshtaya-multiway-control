@@ -14,18 +14,67 @@ from .const import (
     DOMAIN,
     SMART_DIRECTION_CONTROLLER,
     SMART_KIND_VIRTUAL,
-    SMART_MEMBER_DOMAINS,
+    SMART_GROUP_TYPES,
     SMART_STATE_ALL,
     SMART_STATE_ANY,
-    VIRTUAL_LIGHT,
-    VIRTUAL_SWITCH,
 )
 
 GROUP_DOMAIN = "group"
-SUPPORTED_TAKEOVER_DOMAINS = {VIRTUAL_LIGHT, VIRTUAL_SWITCH}
+SUPPORTED_TAKEOVER_DOMAINS = set(SMART_GROUP_TYPES)
 CONF_HIDE_MEMBERS = "hide_members"
 CONF_ALL = "all"
 CONF_GROUP_TYPE = "group_type"
+
+
+def _compatibility_signature(
+    hass: HomeAssistant, entity_id: str, group_type: str
+) -> tuple[Any, ...] | None:
+    """Return the strict compatibility signature used by Eshtaya Smart Groups."""
+    state = hass.states.get(entity_id)
+    if state is None:
+        return None
+    attrs = state.attributes
+    device_class = attrs.get("device_class")
+    if group_type == "sensor":
+        return (
+            device_class or "",
+            attrs.get("state_class") or "",
+            "" if device_class else attrs.get("unit_of_measurement") or "",
+        )
+    if group_type in {
+        "binary_sensor",
+        "button",
+        "cover",
+        "event",
+        "lock",
+        "media_player",
+        "switch",
+        "valve",
+    }:
+        return (device_class or "",)
+    return None
+
+
+def _strict_compatibility_problem(
+    hass: HomeAssistant, members: list[str], group_type: str
+) -> str | None:
+    """Return a human-readable reason when strict member types do not match."""
+    baseline: tuple[Any, ...] | None = None
+    baseline_entity: str | None = None
+    for entity_id in members:
+        signature = _compatibility_signature(hass, entity_id, group_type)
+        if signature is None:
+            continue
+        if baseline is None:
+            baseline = signature
+            baseline_entity = entity_id
+            continue
+        if signature != baseline:
+            return (
+                f"{entity_id} is not the same {group_type} subtype as "
+                f"{baseline_entity}; strict takeover requires compatible members"
+            )
+    return None
 
 
 def _resolve_members(hass: HomeAssistant, values: list[str]) -> list[str]:
@@ -65,10 +114,20 @@ def native_group_entries(hass: HomeAssistant) -> list[dict[str, Any]]:
             members = _resolve_members(hass, raw_members)
             area_id = entity_entry.area_id
             area = area_registry.async_get_area(area_id) if area_id else None
+            same_domain_members = bool(members) and all(
+                member.split(".", 1)[0] == group_type for member in members
+            )
+            compatibility_problem = (
+                _strict_compatibility_problem(hass, members, group_type)
+                if same_domain_members and group_type in SUPPORTED_TAKEOVER_DOMAINS
+                else None
+            )
             takeover_supported = (
                 domain in SUPPORTED_TAKEOVER_DOMAINS
                 and group_type in SUPPORTED_TAKEOVER_DOMAINS
-                and bool(members)
+                and domain == group_type
+                and same_domain_members
+                and compatibility_problem is None
             )
             reason = None
             if not takeover_supported:
@@ -76,8 +135,14 @@ def native_group_entries(hass: HomeAssistant) -> list[dict[str, Any]]:
                     reason = f"Exact entity-id takeover is not supported for the {domain} domain yet"
                 elif group_type not in SUPPORTED_TAKEOVER_DOMAINS:
                     reason = f"Group type {group_type or 'unknown'} is not supported for takeover yet"
+                elif domain != group_type:
+                    reason = "The entity domain does not match the configured Group type"
                 elif not members:
                     reason = "The group has no members"
+                elif not same_domain_members:
+                    reason = "This group mixes member domains; strict same-domain takeover requires matching members"
+                elif compatibility_problem:
+                    reason = compatibility_problem
             rows.append(
                 {
                     "entity_id": entity_id,
@@ -152,9 +217,13 @@ def _source_metadata(hass: HomeAssistant, source_entity_id: str) -> dict[str, An
     options = dict(config_entry.options)
     group_type = str(options.get(CONF_GROUP_TYPE) or source_entity_id.split(".", 1)[0])
     source_domain = source_entity_id.split(".", 1)[0]
-    if source_domain not in SUPPORTED_TAKEOVER_DOMAINS or group_type not in SUPPORTED_TAKEOVER_DOMAINS:
+    if (
+        source_domain not in SUPPORTED_TAKEOVER_DOMAINS
+        or group_type not in SUPPORTED_TAKEOVER_DOMAINS
+        or source_domain != group_type
+    ):
         raise ValueError(
-            "Exact takeover currently supports Home Assistant Light Groups and Switch Groups only"
+            f"Exact takeover is not available for the {group_type or source_domain} group type"
         )
     members = _resolve_members(hass, list(options.get(CONF_ENTITIES) or []))
     if not members:
@@ -162,9 +231,14 @@ def _source_metadata(hass: HomeAssistant, source_entity_id: str) -> dict[str, An
         attrs_members = state.attributes.get("entity_id") if state else None
         if isinstance(attrs_members, (list, tuple)):
             members = _resolve_members(hass, list(attrs_members))
-    members = [m for m in members if m.split(".", 1)[0] in SMART_MEMBER_DOMAINS]
     if not members:
-        raise ValueError("The Home Assistant group has no compatible commandable members")
+        raise ValueError("The Home Assistant group has no members")
+    if any(m.split(".", 1)[0] != group_type for m in members):
+        raise ValueError(
+            "Take Over requires every member to have the same domain as the group"
+        )
+    if compatibility_problem := _strict_compatibility_problem(hass, members, group_type):
+        raise ValueError(compatibility_problem)
 
     return {
         "entity_id": source_entity_id,
@@ -197,16 +271,15 @@ async def _wait_until(predicate, timeout: float = 5.0) -> Any:
     return None
 
 
-def _control_unique_id(group_id: str, virtual_type: str) -> str:
-    suffix = "control_light" if virtual_type == VIRTUAL_LIGHT else "control_switch"
-    return f"smart_{group_id}_{suffix}"
+def _control_unique_id(group_id: str, group_type: str) -> str:
+    return f"smart_{group_id}_control_{group_type}"
 
 
 def _find_control_registry_entry(
-    hass: HomeAssistant, group_id: str, virtual_type: str
+    hass: HomeAssistant, group_id: str, group_type: str
 ) -> er.RegistryEntry | None:
     registry = er.async_get(hass)
-    unique_id = _control_unique_id(group_id, virtual_type)
+    unique_id = _control_unique_id(group_id, group_type)
     for entry in registry.entities.values():
         if entry.platform == DOMAIN and entry.unique_id == unique_id:
             return entry
@@ -236,7 +309,8 @@ async def async_take_over_group(
             )
 
     source_domain = source_entity_id.split(".", 1)[0]
-    virtual_type = VIRTUAL_LIGHT if source_domain == VIRTUAL_LIGHT else VIRTUAL_SWITCH
+    group_type = meta["group_type"]
+    virtual_type = group_type
     temp_source_id = f"{source_domain}.eshtaya_takeover_source_{uuid4().hex[:10]}"
     created_group: dict[str, Any] | None = None
     source_moved = False
@@ -268,6 +342,7 @@ async def async_take_over_group(
                     {"entity_id": entity_id, "enabled": True}
                     for entity_id in meta["members"]
                 ],
+                "group_type": group_type,
                 "virtual_type": virtual_type,
                 "area_id": meta["area_id"],
                 "hide_members": meta["hide_members"],
@@ -282,6 +357,9 @@ async def async_take_over_group(
                 "behavior": {
                     "state_policy": SMART_STATE_ALL if meta["all"] else SMART_STATE_ANY,
                     "direction": SMART_DIRECTION_CONTROLLER,
+                    "sensor_calc_type": str(meta["options"].get("type") or "mean"),
+                    "ignore_non_numeric": bool(meta["options"].get("ignore_non_numeric", False)),
+                    "compatibility_mode": "strict",
                 },
             }
         )

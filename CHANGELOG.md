@@ -1,5 +1,40 @@
 # Changelog
 
+## 3.2.0 - 2026-08-22
+
+### Domain-native Smart Groups
+- Expanded Smart Groups from Light/Switch-only virtual controls to every current Home Assistant Group domain: Binary Sensor, Button, Cover, Event, Fan, Light, Lock, Media Player, Notify, Sensor, Switch and Valve.
+- Virtual Smart Groups now create an entity in the selected native domain instead of reducing rich domains to generic ON/OFF.
+- Reused Home Assistant Core Group entity implementations as the behavior layer so Cover position/tilt/stop, Fan percentage/direction/oscillation, Media Player features, Valve positioning, Notify delivery, Event propagation and Sensor statistics retain native semantics.
+- Added domain-aware Control Center actions and Area commissioning for all supported group domains.
+- Added strict same-domain backend validation and filtered entity pickers.
+- Added Strict compatibility filtering by device class and, for Sensor groups, by device class + unit + state class. Added Advanced Domain-only mode for intentional same-domain subtype mixing.
+- Expanded transactional Take Over to compatible UI-created Home Assistant groups in all supported domains while preserving the exact original entity ID and registry metadata.
+- Added safe read-only handling for legacy/YAML groups and official Sensor groups that mix `sensor`, `number`, or `input_number` members, because Eshtaya V3.2 intentionally enforces the selected domain on every member.
+- Added native-platform modules for Cover, Fan, Lock, Media Player, Valve, Event and Notify plus native Smart Group entities for Binary Sensor, Sensor and Button.
+- Rich-domain physical-controller groups now dispatch native actions instead of passing through the ON/OFF synchronization engine.
+- Added regression coverage for the complete domain list, cross-domain rejection, cover subtype compatibility, Domain-only override and Sensor measurement compatibility.
+
+## 3.1.2 - 2026-08-22
+
+### Added
+- Added a one-click **Enable / Disable** control to every managed Smart Group card and favorite Smart Group card.
+- Disabling a Smart Group now stops queued edges, verification/retry tasks, scene-settle tasks, and clears its out-of-sync Repair issue without changing any physical member state.
+- Re-enabling a Smart Group adopts the current aggregate member state and never sends an automatic ON/OFF command.
+- The existing `Smart Group Enabled` entity now uses the same backend safety path as the Control Center button.
+- Enable/disable remains available even when a group or project configuration is locked because it is an operational safety control, not structural editing.
+
+## 3.1.1 - 2026-08-22
+
+### Smart Group stability hotfix
+- Fixed Smart Groups entering ON/OFF oscillation when a member reported delayed or contextless cloud state updates.
+- Added state-aware command echo suppression for cloud integrations that do not preserve Home Assistant Context.
+- Changed Auto Heal to bounded post-command verification/retry instead of permanent watchdog enforcement.
+- Added explicit `continuous_enforcement` Advanced option, disabled by default.
+- Smart Group virtual light/switch state now reflects the actual aggregate member state instead of stale desired state.
+- Out-of-sync Repair issues clear automatically after members converge.
+- Added regression tests for safe enforcement defaults and contextless echo handling.
+
 ## 3.1.0 - 2026-08-22
 
 - Replaced copy-style Home Assistant group import with transactional **Take Over** migration.

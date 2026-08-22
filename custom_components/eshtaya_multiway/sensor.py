@@ -11,6 +11,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from .const import DATA_RUNTIME, DOMAIN, SIGNAL_GROUPS_UPDATED, SIGNAL_SMART_GROUPS_UPDATED
 from .entity import MultiWayEntity
 from .smart_entity import SmartGroupEntity
+from .smart_native_group import async_setup_smart_native_platform
 
 
 async def async_setup_entry(
@@ -69,6 +70,7 @@ async def async_setup_entry(
     entry.async_on_unload(
         async_dispatcher_connect(hass, SIGNAL_SMART_GROUPS_UPDATED, add_smart)
     )
+    await async_setup_smart_native_platform(hass, entry, async_add_entities, "sensor")
 
 
 class _DiagnosticSensor(MultiWayEntity, SensorEntity):

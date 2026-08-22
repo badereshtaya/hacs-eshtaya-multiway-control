@@ -26,6 +26,7 @@ from .const import (
     SMART_DIRECTION_BIDIRECTIONAL,
     SMART_FAILURE_STOP,
     SMART_KIND_PHYSICAL,
+    SMART_ON_OFF_TYPES,
     SMART_STATE_ALL,
     UNAVAILABLE_STATES,
     VALID_STATES,
@@ -41,6 +42,14 @@ def _invert(state: str) -> str:
     return "off" if state == "on" else "on"
 
 
+def _group_type(group: dict[str, Any]) -> str:
+    return str(group.get("group_type") or group.get("virtual_type") or "light")
+
+
+def _is_on_off_group(group: dict[str, Any]) -> bool:
+    return _group_type(group) in SMART_ON_OFF_TYPES
+
+
 class SmartGroupManager:
     """Control physical-controller and virtual aggregate groups safely."""
 
@@ -51,6 +60,10 @@ class SmartGroupManager:
         self._entity_groups: dict[str, set[str]] = defaultdict(set)
         self._runtime: dict[str, dict[str, Any]] = {}
         self._pending_contexts: dict[str, tuple[str, str, str, float]] = {}
+        # Context may be lost by cloud-backed integrations. Keep a second,
+        # state-aware command-echo guard keyed by Smart Group + entity.
+        self._pending_expected: dict[tuple[str, str], deque[tuple[str, str, float]]] = defaultdict(deque)
+        self._global_expected: dict[str, deque[tuple[str, float]]] = defaultdict(deque)
         self._unsub = None
         self._watchdog = None
         self._activity: deque[dict[str, Any]] = deque(maxlen=300)
@@ -91,6 +104,9 @@ class SmartGroupManager:
         self._verify_tasks.clear()
         self._edge_tasks.clear()
         self._edge_queues.clear()
+        self._pending_contexts.clear()
+        self._pending_expected.clear()
+        self._global_expected.clear()
 
     async def async_reload(self) -> None:
         self._groups = {g["id"]: g for g in self.store.groups()}
@@ -176,6 +192,7 @@ class SmartGroupManager:
             "manual_authority_until": 0.0,
             "manual_authority_source": None,
             "manual_authority_state": None,
+            "verification_active": False,
         }
 
     def list_with_runtime(self) -> list[dict[str, Any]]:
@@ -274,9 +291,37 @@ class SmartGroupManager:
         if new is None:
             return
 
+        # Integration-generated state reports must never become a physical
+        # control edge in another Smart Group that shares this member. This
+        # guard is entity-wide and state-aware, so an opposite real edge still
+        # passes through immediately.
+        if self._is_global_command_echo(entity_id, new.state):
+            self._refresh_runtime(group_id)
+            self._notify(group_id)
+            return
+
         context_id = event.context.id if event.context else None
         pending = self._pending_contexts.pop(context_id, None) if context_id else None
         if pending and pending[0] == group_id and pending[1] == entity_id:
+            self._consume_expected_echo(group_id, entity_id, new.state, pending[2])
+            self._refresh_runtime(group_id)
+            self._notify(group_id)
+            return
+
+        # Tuya and other cloud integrations may emit the resulting state with a
+        # fresh Context. Suppress only a matching state that we recently
+        # commanded; an opposite edge is always treated as a real override.
+        if self._consume_expected_echo(group_id, entity_id, new.state):
+            self._add_activity(
+                group_id,
+                "command_echo",
+                entity_id,
+                new.state,
+                "ignored",
+                None,
+                self._runtime[group_id].get("last_transaction_id"),
+                "echo_guard",
+            )
             self._refresh_runtime(group_id)
             self._notify(group_id)
             return
@@ -293,19 +338,30 @@ class SmartGroupManager:
             self._refresh_runtime(group_id)
             self._notify(group_id)
             return
-        if self._record_flap(group, entity_id):
+        if _is_on_off_group(group) and self._record_flap(group, entity_id):
             self._refresh_runtime(group_id)
             self._notify(group_id)
             return
 
         controller = group.get("controller_entity")
         if entity_id == controller:
-            target = self._controller_target(group, old_state, new_state)
-            if target in VALID_STATES:
-                await self.async_set_state(group_id, target, source=entity_id, origin="physical")
+            if _is_on_off_group(group):
+                target = self._controller_target(group, old_state, new_state)
+                if target in VALID_STATES:
+                    await self.async_set_state(
+                        group_id, target, source=entity_id, origin="physical"
+                    )
+            else:
+                await self._async_handle_domain_controller(
+                    group_id, old_state, new_state, entity_id
+                )
             return
 
-        if group["behavior"].get("direction") == SMART_DIRECTION_BIDIRECTIONAL and new_state in VALID_STATES:
+        if (
+            _is_on_off_group(group)
+            and group["behavior"].get("direction") == SMART_DIRECTION_BIDIRECTIONAL
+            and new_state in VALID_STATES
+        ):
             runtime = self._runtime[group_id]
             if (
                 group["kind"] == SMART_KIND_PHYSICAL
@@ -347,6 +403,158 @@ class SmartGroupManager:
             return _invert(self._runtime[group["id"]].get("desired_state") or self._compute_state(group) or "off")
         return None
 
+    def _rich_binary_state(self, group: dict[str, Any]) -> str | None:
+        """Map a rich domain aggregate to a controller-friendly on/off state."""
+        state = self._compute_state(group)
+        group_type = _group_type(group)
+        if group_type in {"cover", "valve"}:
+            if state == "closed":
+                return "off"
+            if state in {"open", "opening", "closing"}:
+                return "on"
+        elif group_type == "lock":
+            if state in {"locked", "locking"}:
+                return "off"
+            if state in {"unlocked", "unlocking", "open", "opening"}:
+                return "on"
+        elif group_type == "media_player":
+            return "off" if state in {"off", "unavailable", "unknown"} else "on"
+        return None
+
+    def _rich_controller_target(
+        self, group: dict[str, Any], old_state: str | None, new_state: str
+    ) -> str | None:
+        """Return the binary intent produced by a physical controller."""
+        behavior = group["behavior"]
+        mode = behavior.get("controller_mode", MODE_MIRROR)
+        invert = behavior.get("invert_controller", False)
+        mapped = _invert(new_state) if invert and new_state in VALID_STATES else new_state
+        current = self._rich_binary_state(group) or "off"
+        if mode == MODE_MIRROR and mapped in VALID_STATES:
+            return mapped
+        if mode == MODE_TOGGLE and old_state != new_state:
+            return _invert(current)
+        if mode == MODE_MOMENTARY_ON and mapped == "on":
+            return _invert(current)
+        if mode == MODE_MOMENTARY_OFF and mapped == "off":
+            return _invert(current)
+        if mode == MODE_EVENT and old_state != new_state:
+            return _invert(current)
+        return None
+
+    async def _async_handle_domain_controller(
+        self, group_id: str, old_state: str | None, new_state: str, source: str
+    ) -> None:
+        """Fan a physical-controller action out using native domain services."""
+        group = self._groups[group_id]
+        group_type = _group_type(group)
+        if group_type == "button":
+            if old_state != new_state:
+                await self._async_domain_action(
+                    group_id, "press", source=source, origin="physical"
+                )
+            return
+        target = self._rich_controller_target(group, old_state, new_state)
+        if target not in VALID_STATES:
+            self._refresh_runtime(group_id)
+            self._notify(group_id)
+            return
+        action_map = {
+            "cover": {"on": "open_cover", "off": "close_cover"},
+            "valve": {"on": "open_valve", "off": "close_valve"},
+            "lock": {"on": "unlock", "off": "lock"},
+            "media_player": {"on": "turn_on", "off": "turn_off"},
+        }
+        service = action_map.get(group_type, {}).get(target)
+        if service:
+            await self._async_domain_action(
+                group_id, service, source=source, origin="physical"
+            )
+
+    async def _async_domain_action(
+        self,
+        group_id: str,
+        service: str,
+        *,
+        source: str,
+        origin: str,
+        service_data: dict[str, Any] | None = None,
+    ) -> bool:
+        """Execute a native rich-domain service on all enabled group members."""
+        group = self._groups.get(group_id)
+        if not group:
+            raise ValueError("Smart Group not found")
+        if not group.get("enabled", True):
+            raise ValueError("Smart Group is disabled")
+        if group.get("maintenance"):
+            raise ValueError("Smart Group is in maintenance mode")
+        domain = _group_type(group)
+        members = [
+            member["entity_id"]
+            for member in group["members"]
+            if member.get("enabled", True)
+            and not self._is_quarantined(group_id, member["entity_id"])
+        ]
+        if not members:
+            return False
+        txid = uuid4().hex[:12]
+        started = monotonic()
+        results: list[bool] = []
+        for entity_id in members:
+            state = self.hass.states.get(entity_id)
+            if state is None or state.state in UNAVAILABLE_STATES:
+                self._metric(group_id, entity_id, False, None)
+                results.append(False)
+                continue
+            context = Context()
+            data = {"entity_id": entity_id}
+            if service_data:
+                data.update(service_data)
+            start = monotonic()
+            try:
+                await self.hass.services.async_call(
+                    domain,
+                    service,
+                    data,
+                    blocking=group["behavior"].get("performance_mode") == PERFORMANCE_SAFE,
+                    context=context,
+                )
+                latency = int((monotonic() - start) * 1000)
+                self._metric(group_id, entity_id, True, latency)
+                results.append(True)
+            except Exception:  # noqa: BLE001
+                self._metric(group_id, entity_id, False, None)
+                results.append(False)
+                if group["behavior"].get("failure_policy") == SMART_FAILURE_STOP:
+                    break
+        runtime = self._runtime[group_id]
+        runtime.update(
+            {
+                "last_source": source,
+                "last_action": service,
+                "last_changed": _utcnow(),
+                "last_transaction_id": txid,
+                "last_latency_ms": int((monotonic() - started) * 1000),
+                "last_error": None if all(results) else "One or more members failed",
+            }
+        )
+        runtime["commands"] += 1
+        if not all(results):
+            runtime["failures"] += 1
+        self._add_activity(
+            group_id,
+            "domain_action",
+            source,
+            service,
+            "success" if all(results) else "partial",
+            runtime["last_latency_ms"],
+            txid,
+            origin,
+        )
+        self._refresh_runtime(group_id)
+        self._notify(group_id)
+        return all(results)
+
     async def async_set_state(
         self,
         group_id: str,
@@ -361,6 +569,10 @@ class SmartGroupManager:
         group = self._groups.get(group_id)
         if not group:
             raise ValueError("Smart Group not found")
+        if not _is_on_off_group(group):
+            raise ValueError(
+                f"{_group_type(group)} Smart Groups use native domain services, not ON/OFF state sync"
+            )
         if not group.get("enabled", True):
             raise ValueError("Smart Group is disabled")
         if group.get("maintenance"):
@@ -378,6 +590,7 @@ class SmartGroupManager:
                     "last_changed": _utcnow(),
                     "last_transaction_id": txid,
                     "last_error": None,
+                    "verification_active": bool(group["behavior"].get("verify_members")),
                 }
             )
             if origin in {"physical", "member", "test"}:
@@ -477,7 +690,11 @@ class SmartGroupManager:
         if domain not in {"switch", "light", "input_boolean", "fan"}:
             return False
         context = Context()
-        self._pending_contexts[context.id] = (group["id"], entity_id, state, monotonic() + 15.0)
+        echo_seconds = float(group["behavior"].get("command_echo_ms", 5000)) / 1000
+        expires = monotonic() + max(0.25, echo_seconds)
+        self._pending_contexts[context.id] = (group["id"], entity_id, state, expires)
+        self._pending_expected[(group["id"], entity_id)].append((txid, state, expires))
+        self._global_expected[entity_id].append((state, expires))
         start = monotonic()
         try:
             blocking = group["behavior"].get("performance_mode") == PERFORMANCE_SAFE
@@ -499,6 +716,8 @@ class SmartGroupManager:
             return True
         except Exception:  # noqa: BLE001
             self._pending_contexts.pop(context.id, None)
+            self._drop_expected_command(group["id"], entity_id, txid, state)
+            self._drop_global_expected(entity_id, state)
             self._metric(group["id"], entity_id, False, None)
             return False
 
@@ -513,7 +732,11 @@ class SmartGroupManager:
             if not runtime or runtime.get("last_transaction_id") != txid:
                 return
             mismatches = self._mismatches(group, expected)
-            retries = int(group["behavior"].get("max_retries", 1))
+            retries = (
+                int(group["behavior"].get("max_retries", 1))
+                if group["behavior"].get("auto_heal", True)
+                else 0
+            )
             for _ in range(retries):
                 if not mismatches or runtime.get("last_transaction_id") != txid:
                     break
@@ -533,6 +756,7 @@ class SmartGroupManager:
                     self._notify_fault(group, runtime["last_error"])
             elif not mismatches:
                 self._delete_issue(f"smart_group_out_of_sync_{group_id}")
+            runtime["verification_active"] = False
             self._refresh_runtime(group_id)
             self._notify(group_id)
         except asyncio.CancelledError:
@@ -540,6 +764,8 @@ class SmartGroupManager:
 
     async def _reflect_controller_if_needed(self, group_id: str) -> None:
         group = self._groups[group_id]
+        if not _is_on_off_group(group):
+            return
         if group["kind"] != SMART_KIND_PHYSICAL or not group["behavior"].get("reflect_controller"):
             return
         controller = group.get("controller_entity")
@@ -554,10 +780,60 @@ class SmartGroupManager:
                 state = _invert(state)
             await self._async_command_entity(group, controller, state, "reflect")
 
+    async def async_action(
+        self,
+        group_id: str,
+        action: str,
+        *,
+        source: str = "panel",
+        service_data: dict[str, Any] | None = None,
+    ) -> bool:
+        """Execute a domain-aware group action from the management API."""
+        group = self._groups.get(group_id)
+        if not group:
+            raise ValueError("Smart Group not found")
+        group_type = _group_type(group)
+        if group_type in SMART_ON_OFF_TYPES:
+            if action not in VALID_STATES:
+                raise ValueError(f"Unsupported {group_type} group action: {action}")
+            return await self.async_set_state(
+                group_id,
+                action,
+                source=source,
+                origin="panel",
+                service_data=service_data,
+            )
+        allowed: dict[str, set[str]] = {
+            "cover": {"open_cover", "close_cover", "stop_cover"},
+            "valve": {"open_valve", "close_valve", "stop_valve"},
+            "lock": {"lock", "unlock", "open"},
+            "media_player": {"turn_on", "turn_off", "media_play", "media_pause"},
+            "button": {"press"},
+        }
+        if action not in allowed.get(group_type, set()):
+            if group_type == "notify":
+                raise ValueError(
+                    "Notify groups are used through the native notify entity so message data is preserved"
+                )
+            raise ValueError(f"{group_type} groups are read-only or do not support {action}")
+        return await self._async_domain_action(
+            group_id,
+            action,
+            source=source,
+            origin="panel",
+            service_data=service_data,
+        )
+
     async def async_sync(self, group_id: str) -> bool:
         group = self._groups.get(group_id)
         if not group:
             raise ValueError("Smart Group not found")
+        if not _is_on_off_group(group):
+            # Native rich-domain groups continuously derive their public state from
+            # members. Sync is deliberately non-destructive for them.
+            self._refresh_runtime(group_id)
+            self._notify(group_id)
+            return True
         state: str | None
         if group["kind"] == SMART_KIND_PHYSICAL:
             controller_state = self.hass.states.get(group.get("controller_entity"))
@@ -580,7 +856,7 @@ class SmartGroupManager:
             raise ValueError("Smart Group not found")
         before = self._compute_state(group)
         report = self.test_group(group_id)
-        if destructive and before in VALID_STATES:
+        if destructive and _is_on_off_group(group) and before in VALID_STATES:
             target = _invert(before)
             started = monotonic()
             ok1 = await self.async_set_state(group_id, target, source="test_center", origin="test")
@@ -664,12 +940,30 @@ class SmartGroupManager:
             self._cleanup_quarantine(group_id)
             runtime = self._runtime[group_id]
             expected = runtime.get("desired_state")
-            if group["behavior"].get("auto_heal") and expected in VALID_STATES:
-                mismatches = self._mismatches(group, expected)
-                if mismatches:
-                    await self.async_set_state(
-                        group_id, expected, source="watchdog", origin="auto_heal"
+            mismatches = (
+                self._mismatches(group, expected)
+                if _is_on_off_group(group) and expected in VALID_STATES
+                else []
+            )
+            # Standard Smart Group semantics are command fan-out, not a forever
+            # thermostat. Continuous enforcement is deliberately opt-in because
+            # otherwise automations/devices can fight the watchdog and oscillate.
+            if (
+                group["behavior"].get("continuous_enforcement", False)
+                and expected in VALID_STATES
+                and mismatches
+            ):
+                txid = f"watchdog-{uuid4().hex[:8]}"
+                await asyncio.gather(
+                    *(
+                        self._async_command_entity(group, entity_id, expected, txid)
+                        for entity_id in mismatches
+                        if not self._is_quarantined(group_id, entity_id)
                     )
+                )
+            elif expected in VALID_STATES and not mismatches:
+                runtime["last_error"] = None
+                self._delete_issue(f"smart_group_out_of_sync_{group_id}")
             self._refresh_runtime(group_id)
             self._notify(group_id)
 
@@ -680,8 +974,12 @@ class SmartGroupManager:
         runtime = self._runtime.setdefault(group_id, self._new_runtime())
         state = self._compute_state(group)
         runtime["state"] = state
-        if runtime.get("desired_state") not in VALID_STATES:
-            runtime["desired_state"] = state if state in VALID_STATES else None
+        if _is_on_off_group(group):
+            if runtime.get("desired_state") not in VALID_STATES:
+                runtime["desired_state"] = state if state in VALID_STATES else None
+        else:
+            runtime["desired_state"] = None
+            runtime["verification_active"] = False
 
         tracked = [member["entity_id"] for member in group["members"]]
         controller = group.get("controller_entity") if group["kind"] == SMART_KIND_PHYSICAL else None
@@ -705,8 +1003,15 @@ class SmartGroupManager:
                 health = "degraded"
             elif quarantined:
                 health = "quarantined"
+            elif runtime.get("last_error"):
+                health = "degraded"
             elif (
-                runtime.get("desired_state") in VALID_STATES
+                _is_on_off_group(group)
+                and runtime.get("desired_state") in VALID_STATES
+                and (
+                    runtime.get("verification_active")
+                    or group["behavior"].get("continuous_enforcement", False)
+                )
                 and self._mismatches(group, runtime["desired_state"])
             ):
                 health = "out_of_sync"
@@ -715,38 +1020,74 @@ class SmartGroupManager:
         runtime["health"] = health
 
     def _compute_state(self, group: dict[str, Any]) -> str:
+        group_type = _group_type(group)
         states: list[str] = []
-        takeover_compat = bool((group.get("migration") or {}).get("takeover"))
         for member in group["members"]:
             if not member.get("enabled", True) or self._is_quarantined(
                 group["id"], member["entity_id"]
             ):
                 continue
             state = self.hass.states.get(member["entity_id"])
-            if takeover_compat:
-                states.append(state.state if state is not None else "unavailable")
-            elif state and state.state in VALID_STATES:
+            if state is not None and state.state not in UNAVAILABLE_STATES:
                 states.append(state.state)
         if not states:
             return "unavailable"
 
         all_policy = group["behavior"].get("state_policy") == SMART_STATE_ALL
-        if takeover_compat:
-            valid = [state not in UNAVAILABLE_STATES for state in states]
-            valid_state = all(valid) if all_policy else any(valid)
-            if not valid_state:
-                return "unavailable"
+        if group_type in SMART_ON_OFF_TYPES or group_type == "binary_sensor":
             command_states = [state for state in states if state in VALID_STATES]
-        else:
-            command_states = states
+            if not command_states:
+                return "unavailable"
+            if all_policy:
+                return "on" if all(state == "on" for state in command_states) else "off"
+            return "on" if any(state == "on" for state in command_states) else "off"
 
-        if not command_states:
-            return "unavailable"
-        if all_policy:
-            return "on" if all(state == "on" for state in command_states) else "off"
-        return "on" if any(state == "on" for state in command_states) else "off"
+        if group_type in {"cover", "valve"}:
+            if "opening" in states:
+                return "opening"
+            if "closing" in states:
+                return "closing"
+            if all(state == "closed" for state in states):
+                return "closed"
+            if any(state == "open" for state in states):
+                return "open"
+            return states[0]
+
+        if group_type == "lock":
+            for priority in ("jammed", "unlocking", "locking", "unlocked", "open", "locked"):
+                if priority in states:
+                    if priority == "locked" and not all(state == "locked" for state in states):
+                        continue
+                    return priority
+            return states[0]
+
+        if group_type == "media_player":
+            for priority in (
+                "playing",
+                "buffering",
+                "paused",
+                "on",
+                "idle",
+                "standby",
+                "off",
+            ):
+                if priority in states:
+                    return priority
+            return states[0]
+
+        if group_type == "sensor":
+            # The domain-native SensorGroup entity performs the configured
+            # calculation. Runtime diagnostics only need a representative state.
+            return states[0]
+        if group_type == "event":
+            return max(states)
+        if group_type in {"button", "notify"}:
+            return "available"
+        return states[0]
 
     def _mismatches(self, group: dict[str, Any], expected: str) -> list[str]:
+        if not _is_on_off_group(group):
+            return []
         result = []
         for member in group["members"]:
             entity_id = member["entity_id"]
@@ -881,6 +1222,92 @@ class SmartGroupManager:
         for context_id, pending in list(self._pending_contexts.items()):
             if pending[3] <= now:
                 self._pending_contexts.pop(context_id, None)
+        for key, queue in list(self._pending_expected.items()):
+            while queue and queue[0][2] <= now:
+                queue.popleft()
+            if not queue:
+                self._pending_expected.pop(key, None)
+        for entity_id, queue in list(self._global_expected.items()):
+            while queue and queue[0][1] <= now:
+                queue.popleft()
+            if not queue:
+                self._global_expected.pop(entity_id, None)
+
+    def _is_global_command_echo(self, entity_id: str, new_state: str) -> bool:
+        """Return True for our recent command echo, independent of HA Context."""
+        queue = self._global_expected.get(entity_id)
+        if not queue:
+            return False
+        now = monotonic()
+        while queue and queue[0][1] <= now:
+            queue.popleft()
+        if not queue:
+            self._global_expected.pop(entity_id, None)
+            return False
+        if any(state == new_state for state, _expires in queue):
+            return True
+        # An opposite edge is authoritative. Drop stale expectations everywhere
+        # so a later same-state physical transition is not swallowed by the old
+        # command, even when the cloud integration lost the original Context.
+        self._global_expected.pop(entity_id, None)
+        for key in [key for key in self._pending_expected if key[1] == entity_id]:
+            self._pending_expected.pop(key, None)
+        for context_id, pending in list(self._pending_contexts.items()):
+            if pending[1] == entity_id:
+                self._pending_contexts.pop(context_id, None)
+        return False
+
+    def _consume_expected_echo(
+        self,
+        group_id: str,
+        entity_id: str,
+        new_state: str,
+        expected_state: str | None = None,
+    ) -> bool:
+        """Consume a recent matching command echo without hiding opposite edges."""
+        key = (group_id, entity_id)
+        queue = self._pending_expected.get(key)
+        if not queue:
+            return False
+        now = monotonic()
+        while queue and queue[0][2] <= now:
+            queue.popleft()
+        if not queue:
+            self._pending_expected.pop(key, None)
+            return False
+        wanted = expected_state or new_state
+        for index, (_txid, state, _expires) in enumerate(queue):
+            if state == wanted and new_state == state:
+                del queue[index]
+                if not queue:
+                    self._pending_expected.pop(key, None)
+                return True
+        return False
+
+    def _drop_expected_command(
+        self, group_id: str, entity_id: str, txid: str, state: str
+    ) -> None:
+        key = (group_id, entity_id)
+        queue = self._pending_expected.get(key)
+        if not queue:
+            return
+        kept = deque(
+            item for item in queue if not (item[0] == txid and item[1] == state)
+        )
+        if kept:
+            self._pending_expected[key] = kept
+        else:
+            self._pending_expected.pop(key, None)
+
+    def _drop_global_expected(self, entity_id: str, state: str) -> None:
+        queue = self._global_expected.get(entity_id)
+        if not queue:
+            return
+        kept = deque(item for item in queue if item[0] != state)
+        if kept:
+            self._global_expected[entity_id] = kept
+        else:
+            self._global_expected.pop(entity_id, None)
 
     def _record_flap(self, group: dict[str, Any], entity_id: str) -> bool:
         key = (group["id"], entity_id)
@@ -912,6 +1339,56 @@ class SmartGroupManager:
         for key in list(self._quarantine):
             if key[0] == group_id:
                 self._is_quarantined(*key)
+
+    async def async_set_enabled(self, group_id: str, enabled: bool) -> dict[str, Any]:
+        """Enable or disable a Smart Group without changing any member state."""
+        group = self._groups.get(group_id)
+        if not group:
+            raise ValueError("Smart Group not found")
+
+        enabled = bool(enabled)
+        if bool(group.get("enabled", True)) == enabled:
+            self._refresh_runtime(group_id)
+            self._notify(group_id)
+            return self.store.get(group_id) or group
+
+        if not enabled:
+            # Stop all corrective/background work before persisting the disabled state.
+            for mapping in (self._verify_tasks, self._scene_tasks, self._edge_tasks):
+                task = mapping.pop(group_id, None)
+                if task and not task.done():
+                    task.cancel()
+            self._edge_queues.pop(group_id, None)
+            for context_id, pending in list(self._pending_contexts.items()):
+                if pending and pending[0] == group_id:
+                    self._pending_contexts.pop(context_id, None)
+            for key in [key for key in self._pending_expected if key[0] == group_id]:
+                self._pending_expected.pop(key, None)
+            runtime = self._runtime.setdefault(group_id, self._new_runtime())
+            runtime["verification_active"] = False
+            runtime["desired_state"] = None
+            runtime["last_error"] = None
+            self._delete_issue(f"smart_group_out_of_sync_{group_id}")
+
+        updated = await self.store.async_set_enabled(group_id, enabled)
+        await self.async_reload()
+
+        # Re-enable adopts the current aggregate state; it never commands members.
+        runtime = self._runtime.setdefault(group_id, self._new_runtime())
+        runtime["desired_state"] = None
+        self._refresh_runtime(group_id)
+        self._add_activity(
+            group_id,
+            "group_enabled" if enabled else "group_disabled",
+            "control_center",
+            "enabled" if enabled else "disabled",
+            "success",
+            None,
+            None,
+            "runtime_control",
+        )
+        self._notify(group_id)
+        return updated
 
     async def async_set_member_quarantine(
         self, group_id: str, entity_id: str, enabled: bool

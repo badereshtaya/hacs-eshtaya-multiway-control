@@ -5,7 +5,7 @@ from typing import Final
 
 DOMAIN: Final = "eshtaya_multiway"
 NAME: Final = "Eshtaya Multi-Way Control"
-VERSION: Final = "3.1.0"
+VERSION: Final = "3.2.0"
 MANUFACTURER: Final = "Eshtaya Smart"
 MODEL: Final = "Virtual Multi-Way Group"
 SMART_MODEL: Final = "Smart Group"
@@ -16,7 +16,7 @@ STORAGE_VERSION: Final = 1
 SCHEMA_VERSION: Final = 2
 SMART_STORAGE_KEY: Final = f"{DOMAIN}.smart_groups"
 SMART_STORAGE_VERSION: Final = 1
-SMART_SCHEMA_VERSION: Final = 1
+SMART_SCHEMA_VERSION: Final = 2
 
 PANEL_URL: Final = "eshtaya-multiway"
 PANEL_ELEMENT: Final = "eshtaya-multiway-panel"
@@ -114,19 +114,66 @@ SMART_DIRECTIONS: Final = {SMART_DIRECTION_CONTROLLER, SMART_DIRECTION_BIDIRECTI
 SMART_FAILURE_CONTINUE: Final = "continue"
 SMART_FAILURE_STOP: Final = "stop"
 SMART_FAILURE_POLICIES: Final = {SMART_FAILURE_CONTINUE, SMART_FAILURE_STOP}
-SMART_MEMBER_DOMAINS: Final = {"switch", "light", "input_boolean", "fan"}
+SMART_GROUP_TYPES: Final = {
+    "binary_sensor",
+    "button",
+    "cover",
+    "event",
+    "fan",
+    "light",
+    "lock",
+    "media_player",
+    "notify",
+    "sensor",
+    "switch",
+    "valve",
+}
+SMART_COMMANDABLE_TYPES: Final = {
+    "button",
+    "cover",
+    "fan",
+    "light",
+    "lock",
+    "media_player",
+    "switch",
+    "valve",
+}
+SMART_STATEFUL_TYPES: Final = {"cover", "fan", "light", "lock", "media_player", "switch", "valve"}
+SMART_ON_OFF_TYPES: Final = {"fan", "light", "switch"}
+SMART_READ_ONLY_TYPES: Final = {"binary_sensor", "event", "sensor"}
+SMART_MEMBER_DOMAINS: Final = set(SMART_GROUP_TYPES)
+SMART_SENSOR_CALC_TYPES: Final = {
+    "last",
+    "first_available",
+    "max",
+    "mean",
+    "median",
+    "min",
+    "product",
+    "range",
+    "stdev",
+    "sum",
+}
 SMART_CONTROLLER_DOMAINS: Final = {
     "switch", "light", "input_boolean", "binary_sensor", "button", "input_button", "event"
 }
 SMART_DEFAULT_BEHAVIOR: Final = {
     "state_policy": SMART_STATE_ANY,
+    "sensor_calc_type": "mean",
+    "ignore_non_numeric": False,
+    "compatibility_mode": "strict",
     "direction": SMART_DIRECTION_CONTROLLER,
     "controller_mode": MODE_MIRROR,
     "invert_controller": False,
     "reflect_controller": True,
     "performance_mode": PERFORMANCE_INSTANT,
     "auto_heal": True,
+    # Retry failed members only during the bounded verification window after a command.
     "verify_members": True,
+    # Never fight automations/devices forever unless the installer explicitly opts in.
+    "continuous_enforcement": False,
+    # Cloud integrations may lose HA Context; suppress matching command echoes by state too.
+    "command_echo_ms": 5000,
     "command_timeout": 3.0,
     "max_retries": 1,
     "member_delay_ms": 0,

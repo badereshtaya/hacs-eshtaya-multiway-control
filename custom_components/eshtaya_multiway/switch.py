@@ -3,21 +3,15 @@ from __future__ import annotations
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import ATTR_ASSUMED_STATE, EntityCategory
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .const import (
-    DATA_RUNTIME,
-    DOMAIN,
-    SIGNAL_GROUPS_UPDATED,
-    SIGNAL_SMART_GROUPS_UPDATED,
-    SMART_KIND_VIRTUAL,
-    VIRTUAL_SWITCH,
-)
+from .const import DATA_RUNTIME, DOMAIN, SIGNAL_GROUPS_UPDATED, SIGNAL_SMART_GROUPS_UPDATED, VIRTUAL_SWITCH
 from .entity import MultiWayEntity
 from .smart_entity import SmartGroupEntity
+from .smart_native_group import async_setup_smart_native_platform
 
 
 async def async_setup_entry(
@@ -25,10 +19,9 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up control and enabled switches for both engines."""
+    """Set up switches for both engines plus native Smart switch groups."""
     known_control: set[str] = set()
     known_enabled: set[str] = set()
-    known_smart_control: set[str] = set()
     known_smart_enabled: set[str] = set()
 
     @callback
@@ -47,7 +40,7 @@ async def async_setup_entry(
             async_add_entities(entities)
 
     @callback
-    def add_smart() -> None:
+    def add_smart_enabled() -> None:
         store = hass.data[DOMAIN][DATA_RUNTIME]["smart_store"]
         entities: list[SwitchEntity] = []
         for group in store.groups():
@@ -55,24 +48,14 @@ async def async_setup_entry(
             if group_id not in known_smart_enabled:
                 known_smart_enabled.add(group_id)
                 entities.append(SmartGroupEnabledSwitch(hass, group_id))
-            if (
-                group["kind"] == SMART_KIND_VIRTUAL
-                and group["virtual_type"] == VIRTUAL_SWITCH
-                and group_id not in known_smart_control
-            ):
-                known_smart_control.add(group_id)
-                entities.append(SmartGroupVirtualSwitch(hass, group_id))
         if entities:
             async_add_entities(entities)
 
     add_multi()
-    add_smart()
-    entry.async_on_unload(
-        async_dispatcher_connect(hass, SIGNAL_GROUPS_UPDATED, add_multi)
-    )
-    entry.async_on_unload(
-        async_dispatcher_connect(hass, SIGNAL_SMART_GROUPS_UPDATED, add_smart)
-    )
+    add_smart_enabled()
+    entry.async_on_unload(async_dispatcher_connect(hass, SIGNAL_GROUPS_UPDATED, add_multi))
+    entry.async_on_unload(async_dispatcher_connect(hass, SIGNAL_SMART_GROUPS_UPDATED, add_smart_enabled))
+    await async_setup_smart_native_platform(hass, entry, async_add_entities, "switch")
 
 
 class MultiWayVirtualSwitch(MultiWayEntity, SwitchEntity):
@@ -135,69 +118,6 @@ class MultiWayEnabledSwitch(MultiWayEntity, SwitchEntity):
         await self.manager.async_set_enabled(self.group_id, False)
 
 
-class SmartGroupVirtualSwitch(SmartGroupEntity, SwitchEntity):
-    """Virtual switch representing a Smart Group."""
-
-    _attr_translation_key = "smart_group_control"
-
-    def __init__(self, hass: HomeAssistant, group_id: str) -> None:
-        super().__init__(hass, group_id, "control_switch")
-
-    def _still_expected(self, group) -> bool:
-        return bool(
-            group
-            and group["kind"] == SMART_KIND_VIRTUAL
-            and group["virtual_type"] == VIRTUAL_SWITCH
-        )
-
-    @property
-    def available(self) -> bool:
-        """Match native group availability from the current member states."""
-        group = self.group or {}
-        states = [
-            self.hass.states.get(member["entity_id"])
-            for member in group.get("members", [])
-            if member.get("enabled", True)
-        ]
-        return any(state is not None and state.state != "unavailable" for state in states)
-
-    @property
-    def assumed_state(self) -> bool:
-        """Match native Switch Group assumed-state behavior."""
-        group = self.group or {}
-        return any(
-            bool(state.attributes.get(ATTR_ASSUMED_STATE))
-            for member in group.get("members", [])
-            if member.get("enabled", True)
-            and (state := self.hass.states.get(member["entity_id"])) is not None
-        )
-
-    @property
-    def is_on(self) -> bool | None:
-        """Return the effective Smart Group state."""
-        status = self.manager.status(self.group_id)
-        state = status.get("desired_state") or status.get("state")
-        return True if state == "on" else False if state == "off" else None
-
-    async def async_turn_on(self, **kwargs) -> None:
-        """Turn the Smart Group on."""
-        await self.manager.async_set_state(
-            self.group_id,
-            "on",
-            source=self.entity_id or "smart_group",
-            origin="virtual",
-        )
-
-    async def async_turn_off(self, **kwargs) -> None:
-        """Turn the Smart Group off."""
-        await self.manager.async_set_state(
-            self.group_id,
-            "off",
-            source=self.entity_id or "smart_group",
-            origin="virtual",
-        )
-
-
 class SmartGroupEnabledSwitch(SmartGroupEntity, SwitchEntity):
     """Enable or disable a Smart Group."""
 
@@ -215,10 +135,9 @@ class SmartGroupEnabledSwitch(SmartGroupEntity, SwitchEntity):
 
     async def async_turn_on(self, **kwargs) -> None:
         """Enable the Smart Group."""
-        await self.store.async_update(self.group_id, {"enabled": True})
-        await self.manager.async_reload()
+        await self.manager.async_set_enabled(self.group_id, True)
 
     async def async_turn_off(self, **kwargs) -> None:
         """Disable the Smart Group."""
-        await self.store.async_update(self.group_id, {"enabled": False})
-        await self.manager.async_reload()
+        await self.manager.async_set_enabled(self.group_id, False)
+

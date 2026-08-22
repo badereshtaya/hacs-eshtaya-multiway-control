@@ -13,7 +13,7 @@ No YAML automations are required. The integration coordinates entities that alre
 
 > Domain: `eshtaya_multiway`  
 > Repository: `badereshtaya/hacs-eshtaya-multiway-control`  
-> Current release: **3.1.0**
+> Current release: **3.2.0**
 
 ## Requirements
 
@@ -98,50 +98,68 @@ Living Room
 
 ## Smart Groups
 
-Smart Groups are independent from the Multi-Way engine so large aggregate operations cannot block wall-switch synchronization.
+Smart Groups are independent from the Multi-Way engine so large aggregate operations cannot block wall-switch synchronization. V3.2 is **domain-native**: a virtual group is created as the same Home Assistant domain it represents and inherits the native Group behavior for that domain.
+
+### Supported Home Assistant Group domains
+
+- `binary_sensor`
+- `button`
+- `cover`
+- `event`
+- `fan`
+- `light`
+- `lock`
+- `media_player`
+- `notify`
+- `sensor`
+- `switch`
+- `valve`
+
+For rich domains, Eshtaya uses Home Assistant's own Group entity implementations as the behavioral base. That means Cover groups keep position/tilt/stop support, Fan groups keep percentage/direction/oscillation, Media Player groups keep their supported media/volume features, Valve groups keep position/stop support, Notify groups keep native message delivery, and Event/Sensor/Binary Sensor groups aggregate state using their native semantics.
+
+### Intelligent member filtering
+
+The selected **Group domain is authoritative**. A `cover` Smart Group can contain only `cover.*` members, a `fan` group only `fan.*`, and so on. This is enforced twice: in the Control Center picker and again in the backend API.
+
+The default **Strict compatibility** mode additionally keeps matching sub-types together:
+
+- domains that expose a `device_class` are checked for matching device class;
+- Sensor groups require matching `device_class`, `unit_of_measurement`, and `state_class`;
+- domains such as Light and Fan rely on Home Assistant's native feature aggregation so compatible capabilities can be combined safely.
+
+An Advanced **Domain only** mode is available when an installer intentionally wants to combine different sub-types inside the same domain. It never permits cross-domain members.
 
 ### Physical Controller Group
 
-A real entity controls a set of members:
-
-```text
-Physical controller: switch.floor_master
-├── light.hall
-├── switch.corridor
-└── light.stairs
-```
-
-The controller can use mirror, toggle, momentary or event behavior. State can optionally be reflected back to a commandable controller.
+A real wall/button entity controls a set of same-domain members. Supported commandable group types map the controller to native actions; for example Cover maps ON/OFF to Open/Close, Valve to Open/Close, Lock to Unlock/Lock, Media Player to Turn on/Turn off, and Button edges to Press. Rich domain service behavior remains native rather than being reduced to generic ON/OFF.
 
 ### Virtual Group
 
-Creates a native Home Assistant `light` or `switch` that controls all members:
+Creates a Home Assistant entity in the selected native domain. Examples:
 
 ```text
-light.ground_floor_group
-├── light.hall
-├── light.living
-└── light.kitchen
+cover.living_covers
+├── cover.left_shutter
+└── cover.right_shutter
+
+fan.all_bedroom_fans
+├── fan.bedroom_1
+└── fan.bedroom_2
 ```
 
 ### Smart Group policies
 
-- State policy: **Any ON** or **All ON**.
-- Direction: controller-only or bidirectional.
-- Instant / Balanced / Safe execution.
-- Member verification and retries.
-- Optional delay between members.
-- Continue-on-failure or stop-on-first-failure.
-- Physical-input priority window.
-- Scene batch guard/adoption.
-- Flapping detector.
-- Automatic or manual member quarantine/release.
-- Maintenance mode.
-- Per-group lock.
-- Favorites.
+- Native domain-aware state and service behavior.
+- Any/All policy where Home Assistant supports it (Light, Switch, Binary Sensor).
+- Sensor statistic modes: last, first available, min, max, mean, median, product, range, standard deviation, and sum.
+- Strict subtype compatibility or Advanced Domain-only compatibility.
+- Controller-only / bidirectional behavior for ON/OFF-capable groups.
+- Instant / Balanced / Safe execution for the reliability engine.
+- Bounded member verification and retries; continuous enforcement remains opt-in.
+- Physical-input priority, scene guard, flapping detector and quarantine.
+- Maintenance mode, enable/disable, per-group lock and favorites.
 - Per-member command, failure, latency and quality metrics.
-- Adaptive verification delay based on observed device response.
-- Repair issue generation and optional persistent notification on repeated faults.
+- Repair issue generation and diagnostics.
 
 ## Commissioning and project workflow
 
@@ -149,13 +167,13 @@ light.ground_floor_group
 - Quick virtual group creation from an Area.
 - Auto-pair suggestions for Multi-Way commissioning.
 - Discover existing Home Assistant native group helpers directly inside the **Smart Groups** section and Commissioning.
-- **Take Over with Eshtaya** performs a transactional migration for UI-created Home Assistant Light Groups and Switch Groups.
+- **Take Over with Eshtaya** performs a transactional migration for compatible UI-created Home Assistant groups across all supported native Group domains.
 - The replacement keeps the **exact same `entity_id`** so dashboards, automations, scenes, voice-assistant references and scripts that target that entity ID do not need to be rewritten.
 - The original Home Assistant Group helper is deleted **only after** the Eshtaya replacement has claimed and verified the original entity ID.
 - Takeover preserves the group name, ordered members, Any/All policy, `hide_members`, Area and user-facing Entity Registry metadata such as aliases, labels, icon, hidden/disabled state and custom name.
-- Taken-over Light Groups forward brightness, color temperature, color, effect, flash and transition commands to compatible light members and aggregate the main light capabilities/state.
+- Taken-over groups are recreated in the same native domain and preserve Home Assistant Group behavior; Light/Cover/Fan/Lock/Media Player/Valve/Button/Notify/Event/Binary Sensor/Sensor/Switch groups keep their domain-specific semantics.
 - If takeover fails before the original helper is removed, the migration rolls back to the original helper and entity ID instead of leaving a half-migrated group.
-- Legacy/YAML/runtime groups and native group types that Eshtaya cannot yet reproduce with the same domain/behavior remain read-only and cannot be destructively taken over.
+- Legacy/YAML/runtime groups remain read-only. UI-created groups are takeover-capable only when their members satisfy Eshtaya same-domain and compatibility rules; incompatible groups remain untouched with an explicit reason.
 - Legacy V3.0.1 copy-import metadata remains readable for backward compatibility, but new migrations use Take Over rather than copy/import.
 - Smart Group templates.
 - Clone groups safely; physical clones intentionally require selecting a new controller.
@@ -188,7 +206,7 @@ light.ground_floor_group
 
 ### Smart Group
 
-Virtual Smart Groups expose a control `light`/`switch`. All Smart Groups expose:
+Virtual Smart Groups expose a control entity in the selected native domain. All Smart Groups expose:
 
 - Enabled switch.
 - Health sensor.
@@ -197,6 +215,16 @@ Virtual Smart Groups expose a control `light`/`switch`. All Smart Groups expose:
 - Last source sensor (disabled by default).
 - Latency sensor (disabled by default).
 - Sync button.
+
+
+### Smart Group anti-oscillation safety
+
+Smart Groups use bounded verification after a group command. They **do not continuously
+force every member back to the last requested state by default**, so a device, automation,
+or person controlling an individual member cannot enter an ON/OFF fight with the watchdog.
+Cloud-backed integrations are additionally protected by a state-aware command echo guard
+that does not depend solely on Home Assistant Context propagation. Continuous enforcement
+remains available as an explicit Advanced opt-in.
 
 ## Installation with HACS
 
@@ -212,7 +240,7 @@ Virtual Smart Groups expose a control `light`/`switch`. All Smart Groups expose:
 
 ## Updating
 
-Releases are versioned with Git tags such as `v3.1.0`. HACS discovers the published GitHub Release and offers it as an update.
+Releases are versioned with Git tags such as `v3.2.0`. HACS discovers the published GitHub Release and offers it as an update.
 
 ## Repository validation
 

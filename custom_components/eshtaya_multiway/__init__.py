@@ -39,9 +39,16 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 PLATFORMS: list[Platform] = [
     Platform.LIGHT,
     Platform.SWITCH,
-    Platform.SENSOR,
+    Platform.FAN,
+    Platform.COVER,
+    Platform.LOCK,
+    Platform.MEDIA_PLAYER,
+    Platform.VALVE,
     Platform.BINARY_SENSOR,
+    Platform.SENSOR,
     Platform.BUTTON,
+    Platform.EVENT,
+    Platform.NOTIFY,
 ]
 
 GROUP_SCHEMA = vol.Schema({vol.Required("group_id"): str})

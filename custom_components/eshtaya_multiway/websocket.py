@@ -22,6 +22,7 @@ from .const import (
     VIRTUAL_LIGHT,
     VIRTUAL_SWITCH,
     VERSION,
+    SMART_GROUP_TYPES,
     SMART_KIND_VIRTUAL,
     SMART_KINDS,
     SMART_MEMBER_DOMAINS,
@@ -104,6 +105,8 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
         ws_smart_delete,
         ws_smart_clone,
         ws_smart_set_state,
+        ws_smart_action,
+        ws_smart_set_enabled,
         ws_smart_sync,
         ws_smart_test,
         ws_smart_test_all,
@@ -403,6 +406,7 @@ async def ws_rapid_toggle_test(hass, connection, msg) -> None:
         vol.Required("type"): f"{DOMAIN}/learn_start",
         vol.Required("role"): vol.In(["output", "controller"]),
         vol.Optional("timeout", default=12): vol.All(vol.Coerce(float), vol.Range(min=5, max=30)),
+        vol.Optional("domains", default=None): vol.Any(None, [str]),
     }
 )
 @callback
@@ -410,7 +414,10 @@ def ws_learn_start(hass, connection, msg) -> None:
     """Start a temporary learn session."""
     try:
         _, manager = _runtime(hass)
-        connection.send_result(msg["id"], manager.start_learn(msg["role"], msg["timeout"]))
+        connection.send_result(
+            msg["id"],
+            manager.start_learn(msg["role"], msg["timeout"], msg.get("domains")),
+        )
     except Exception as err:  # noqa: BLE001
         connection.send_error(msg["id"], "learn_start_failed", str(err))
 
@@ -456,12 +463,14 @@ SMART_GROUP_FIELDS = {
     vol.Required("kind"): vol.In(list(SMART_KINDS)),
     vol.Optional("controller_entity", default=None): vol.Any(None, str),
     vol.Required("members"): vol.All([SMART_MEMBER_SCHEMA], vol.Length(min=1)),
-    vol.Optional("virtual_type", default=VIRTUAL_LIGHT): vol.In([VIRTUAL_LIGHT, VIRTUAL_SWITCH]),
+    vol.Optional("group_type", default=VIRTUAL_LIGHT): vol.In(sorted(SMART_GROUP_TYPES)),
+    vol.Optional("virtual_type", default=VIRTUAL_LIGHT): str,
     vol.Optional("area_id", default=None): vol.Any(None, str),
     vol.Optional("enabled", default=True): bool,
     vol.Optional("maintenance", default=False): bool,
     vol.Optional("locked", default=False): bool,
     vol.Optional("favorite", default=False): bool,
+    vol.Optional("hide_members", default=False): bool,
     vol.Optional("behavior", default={}): dict,
 }
 
@@ -509,13 +518,12 @@ async def ws_smart_update(hass, connection, msg) -> None:
         old = data["smart_store"].get(msg["group_id"])
         payload = {k: v for k, v in msg.items() if k not in {"id", "type", "group_id"}}
         group = await data["smart_store"].async_update(msg["group_id"], payload)
+        old_type = (old or {}).get("group_type") or (old or {}).get("virtual_type")
+        new_type = group.get("group_type") or group.get("virtual_type")
         if old and old.get("kind") == SMART_KIND_VIRTUAL and (
-            group.get("kind") != SMART_KIND_VIRTUAL
-            or old.get("virtual_type") != group.get("virtual_type")
+            group.get("kind") != SMART_KIND_VIRTUAL or old_type != new_type
         ):
-            _remove_smart_control_registry_entity(
-                hass, group["id"], old.get("virtual_type", VIRTUAL_LIGHT)
-            )
+            _remove_smart_control_registry_entity(hass, group["id"], old_type or VIRTUAL_LIGHT)
         await data["smart_manager"].async_reload()
         connection.send_result(msg["id"], group)
     except Exception as err:  # noqa: BLE001
@@ -561,6 +569,61 @@ async def ws_smart_set_state(hass, connection, msg) -> None:
         connection.send_result(msg["id"], {"ok": ok, "runtime": data["smart_manager"].status(msg["group_id"])})
     except Exception as err:  # noqa: BLE001
         connection.send_error(msg["id"], "smart_set_state_failed", str(err))
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/smart/action",
+        vol.Required("group_id"): str,
+        vol.Required("action"): str,
+        vol.Optional("service_data", default={}): dict,
+    }
+)
+@websocket_api.async_response
+async def ws_smart_action(hass, connection, msg) -> None:
+    """Execute a domain-aware action against one Smart Group."""
+    try:
+        data = _runtime_all(hass)
+        ok = await data["smart_manager"].async_action(
+            msg["group_id"],
+            msg["action"],
+            source="panel",
+            service_data=msg.get("service_data") or None,
+        )
+        connection.send_result(
+            msg["id"],
+            {"ok": ok, "runtime": data["smart_manager"].status(msg["group_id"])},
+        )
+    except Exception as err:  # noqa: BLE001
+        connection.send_error(msg["id"], "smart_action_failed", str(err))
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/smart/set_enabled",
+        vol.Required("group_id"): str,
+        vol.Required("enabled"): bool,
+    }
+)
+@websocket_api.async_response
+async def ws_smart_set_enabled(hass, connection, msg) -> None:
+    """Enable or disable one Smart Group."""
+    try:
+        data = _runtime_all(hass)
+        group = await data["smart_manager"].async_set_enabled(
+            msg["group_id"], msg["enabled"]
+        )
+        connection.send_result(
+            msg["id"],
+            {
+                "group": group,
+                "runtime": data["smart_manager"].status(msg["group_id"]),
+            },
+        )
+    except Exception as err:  # noqa: BLE001
+        connection.send_error(msg["id"], "smart_set_enabled_failed", str(err))
 
 
 @websocket_api.require_admin
@@ -918,12 +981,15 @@ async def ws_repair_remap(hass, connection, msg) -> None:
 
 
 def _remove_smart_control_registry_entity(
-    hass: HomeAssistant, group_id: str, virtual_type: str
+    hass: HomeAssistant, group_id: str, group_type: str
 ) -> None:
     """Remove only the obsolete Smart Group control entity after a type change."""
     registry = er.async_get(hass)
-    platform = Platform.LIGHT if virtual_type == VIRTUAL_LIGHT else Platform.SWITCH
-    unique_id = f"smart_{group_id}_control_{virtual_type}"
+    try:
+        platform = Platform(group_type)
+    except ValueError:
+        return
+    unique_id = f"smart_{group_id}_control_{group_type}"
     entity_id = registry.async_get_entity_id(platform, DOMAIN, unique_id)
     if entity_id:
         registry.async_remove(entity_id)
@@ -932,8 +998,7 @@ def _remove_smart_control_registry_entity(
 def _remove_smart_registry_entities(hass: HomeAssistant, group_id: str) -> None:
     registry = er.async_get(hass)
     pairs = [
-        (Platform.LIGHT, f"smart_{group_id}_control_light"),
-        (Platform.SWITCH, f"smart_{group_id}_control_switch"),
+        *((Platform(group_type), f"smart_{group_id}_control_{group_type}") for group_type in sorted(SMART_GROUP_TYPES)),
         (Platform.SWITCH, f"smart_{group_id}_enabled"),
         (Platform.SENSOR, f"smart_{group_id}_health"),
         (Platform.SENSOR, f"smart_{group_id}_quality"),

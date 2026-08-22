@@ -22,13 +22,15 @@ from .const import (
     SMART_KIND_PHYSICAL,
     SMART_KIND_VIRTUAL,
     SMART_KINDS,
+    SMART_GROUP_TYPES,
+    SMART_COMMANDABLE_TYPES,
     SMART_MEMBER_DOMAINS,
+    SMART_SENSOR_CALC_TYPES,
     SMART_SCHEMA_VERSION,
     SMART_STATE_POLICIES,
     SMART_STORAGE_KEY,
     SMART_STORAGE_VERSION,
     VIRTUAL_LIGHT,
-    VIRTUAL_TYPES,
 )
 
 
@@ -152,6 +154,24 @@ class SmartGroupStore:
             self._data["groups"] = [g for g in self._data["groups"] if g["id"] != group_id]
             await self._save()
 
+    async def async_set_enabled(self, group_id: str, enabled: bool) -> dict[str, Any]:
+        """Persist the operational enable state without treating it as config editing.
+
+        Enable/disable is a runtime safety control, so it remains available even when
+        the project or group configuration is locked.
+        """
+        async with self._lock:
+            for index, current in enumerate(self._data["groups"]):
+                if current["id"] != group_id:
+                    continue
+                updated = deepcopy(current)
+                updated["enabled"] = bool(enabled)
+                updated["updated_at"] = _utcnow()
+                self._data["groups"][index] = updated
+                await self._save()
+                return deepcopy(updated)
+        raise ValueError("Smart Group not found")
+
     async def async_clone(self, group_id: str, name: str | None = None) -> dict[str, Any]:
         source = self.get(group_id)
         if not source:
@@ -197,6 +217,7 @@ class SmartGroupStore:
             "created_at": _utcnow(),
             "payload": {
                 "kind": group["kind"],
+                "group_type": group["group_type"],
                 "virtual_type": group["virtual_type"],
                 "behavior": deepcopy(group["behavior"]),
                 "area_id": group.get("area_id"),
@@ -392,7 +413,17 @@ class SmartGroupStore:
             "kind": kind,
             "controller_entity": str(controller).strip() if controller else None,
             "members": members,
-            "virtual_type": payload.get("virtual_type", VIRTUAL_LIGHT),
+            "group_type": str(
+                payload.get("group_type")
+                or payload.get("virtual_type")
+                or VIRTUAL_LIGHT
+            ).strip(),
+            # Kept as a compatibility alias for V2/V3 backups and old UI caches.
+            "virtual_type": str(
+                payload.get("group_type")
+                or payload.get("virtual_type")
+                or VIRTUAL_LIGHT
+            ).strip(),
             "area_id": payload.get("area_id") or None,
             "enabled": bool(payload.get("enabled", True)),
             "maintenance": bool(payload.get("maintenance", False)),
@@ -420,17 +451,28 @@ class SmartGroupStore:
             raise ValueError("Smart Group name is required")
         if group["kind"] not in SMART_KINDS:
             raise ValueError("Unsupported Smart Group kind")
-        if group["virtual_type"] not in VIRTUAL_TYPES:
-            raise ValueError("Virtual type must be light or switch")
+        group_type = group.get("group_type") or group.get("virtual_type")
+        if group_type not in SMART_GROUP_TYPES:
+            raise ValueError(f"Unsupported Smart Group type: {group_type}")
         if not group["members"]:
             raise ValueError("At least one member is required")
         ids = [m["entity_id"] for m in group["members"]]
         if len(ids) != len(set(ids)):
             raise ValueError("A member cannot appear twice")
         for entity_id in ids:
-            if self._domain(entity_id) not in SMART_MEMBER_DOMAINS:
+            domain = self._domain(entity_id)
+            if domain not in SMART_MEMBER_DOMAINS:
                 raise ValueError(f"Unsupported Smart Group member: {entity_id}")
+            if domain != group_type:
+                raise ValueError(
+                    f"{entity_id} is a {domain} entity, but this is a {group_type} group"
+                )
+        self._validate_member_compatibility(group)
         if group["kind"] == SMART_KIND_PHYSICAL:
+            if group_type not in SMART_COMMANDABLE_TYPES or group_type == "notify":
+                raise ValueError(
+                    f"Physical-controller mode is not supported for {group_type} groups"
+                )
             controller = group.get("controller_entity")
             if not controller or self._domain(controller) not in SMART_CONTROLLER_DOMAINS:
                 raise ValueError("Physical Smart Group requires a supported controller entity")
@@ -447,6 +489,8 @@ class SmartGroupStore:
             raise ValueError("Unsupported performance mode")
         if behavior.get("failure_policy") not in SMART_FAILURE_POLICIES:
             raise ValueError("Unsupported failure policy")
+        if behavior.get("sensor_calc_type", "mean") not in SMART_SENSOR_CALC_TYPES:
+            raise ValueError("Unsupported sensor calculation type")
         for key, low, high in (
             ("command_timeout", 0.25, 30),
             ("max_retries", 0, 5),
@@ -456,10 +500,75 @@ class SmartGroupStore:
             ("flap_threshold", 3, 50),
             ("flap_window_sec", 1, 120),
             ("quarantine_sec", 5, 3600),
+            ("command_echo_ms", 250, 15000),
         ):
             value = float(behavior.get(key, SMART_DEFAULT_BEHAVIOR[key]))
             if not low <= value <= high:
                 raise ValueError(f"{key} is outside the supported range")
+
+    def _compatibility_signature(self, entity_id: str, group_type: str) -> tuple[Any, ...] | None:
+        """Return the strict compatibility signature for a Smart Group member.
+
+        Domain equality is always mandatory. Strict mode additionally keeps
+        device sub-types together when Home Assistant exposes a device class.
+        Numeric sensor groups also require matching measurement semantics.
+        """
+        hass = getattr(self, "hass", None)
+        if hass is None:
+            return None
+        state = hass.states.get(entity_id)
+        if state is None:
+            return None
+        attrs = state.attributes
+        device_class = attrs.get("device_class")
+        if group_type == "sensor":
+            # Same sensor type/state semantics are required. When Home Assistant
+            # exposes a device class, its native SensorGroup can convert compatible
+            # units (for example °C/°F), so unit is only a strict discriminator when
+            # there is no device class to describe the measurement family.
+            return (
+                device_class or "",
+                attrs.get("state_class") or "",
+                "" if device_class else attrs.get("unit_of_measurement") or "",
+            )
+        if group_type in {
+            "binary_sensor",
+            "button",
+            "cover",
+            "event",
+            "lock",
+            "media_player",
+            "switch",
+            "valve",
+        }:
+            return (device_class or "",)
+        return None
+
+    def _validate_member_compatibility(self, group: dict[str, Any]) -> None:
+        """Reject strict groups whose members have incompatible sub-types."""
+        behavior = group.get("behavior") or {}
+        if behavior.get("compatibility_mode", "strict") != "strict":
+            return
+        group_type = group.get("group_type") or group.get("virtual_type")
+        baseline: tuple[Any, ...] | None = None
+        baseline_entity: str | None = None
+        for member in group.get("members", []):
+            if not member.get("enabled", True):
+                continue
+            entity_id = member["entity_id"]
+            signature = self._compatibility_signature(entity_id, group_type)
+            if signature is None:
+                continue
+            if baseline is None:
+                baseline = signature
+                baseline_entity = entity_id
+                continue
+            if signature != baseline:
+                raise ValueError(
+                    f"{entity_id} is not the same {group_type} type as "
+                    f"{baseline_entity}. Use Domain-only compatibility in Advanced "
+                    "settings only when this mix is intentional."
+                )
 
     def _validate_controller_unique(self, group: dict[str, Any], ignore_id: str | None) -> None:
         controller = group.get("controller_entity")

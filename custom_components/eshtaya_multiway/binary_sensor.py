@@ -17,6 +17,7 @@ from .const import (
 )
 from .entity import MultiWayEntity
 from .smart_entity import SmartGroupEntity
+from .smart_native_group import async_setup_smart_native_platform
 
 
 async def async_setup_entry(
@@ -62,6 +63,7 @@ async def async_setup_entry(
     entry.async_on_unload(
         async_dispatcher_connect(hass, SIGNAL_SMART_GROUPS_UPDATED, add_smart)
     )
+    await async_setup_smart_native_platform(hass, entry, async_add_entities, "binary_sensor")
 
 
 class MultiWayInSyncSensor(MultiWayEntity, BinarySensorEntity):
