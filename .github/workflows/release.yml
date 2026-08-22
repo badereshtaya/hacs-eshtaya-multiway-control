@@ -1,0 +1,28 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify tag matches manifest version
+        shell: bash
+        run: |
+          VERSION=$(python -c 'import json; print(json.load(open("custom_components/eshtaya_multiway/manifest.json"))["version"])')
+          test "v${VERSION}" = "${GITHUB_REF_NAME}" || { echo "Tag ${GITHUB_REF_NAME} does not match manifest v${VERSION}"; exit 1; }
+      - name: Build release archive
+        run: |
+          mkdir -p dist
+          zip -r "dist/eshtaya-multi-way-control-${GITHUB_REF_NAME}.zip" custom_components/eshtaya_multiway
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/*.zip --generate-notes --title "Eshtaya Multi-Way Control ${GITHUB_REF_NAME}"
