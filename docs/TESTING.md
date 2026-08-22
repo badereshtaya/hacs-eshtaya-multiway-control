@@ -43,11 +43,17 @@ Run repository CI and field-test on a non-critical circuit before broad deployme
 - Learn Main and every Multi-Way controller.
 - Learn physical Smart Group controller and Smart Group members.
 - Area quick-group creation includes only compatible commandable entities.
-- Native Home Assistant group import produces a Smart Group while original stays unchanged.
+- Take over a UI-created native Light Group and verify the Eshtaya replacement has the exact same `light.*` entity ID before the original Config Entry is removed.
+- Take over a UI-created native Switch Group and verify the exact `switch.*` entity ID is preserved.
+- Verify Any/All state policy, member order, `hide_members`, Area, aliases, labels, icon and entity-registry visibility/disabled settings survive takeover.
+- Force a takeover failure before source deletion and verify rollback restores the original entity ID and hidden-member state.
+- Verify a taken-over Light Group still forwards brightness/color/effect/transition service data to its light members.
+- Verify unsupported legacy/YAML/runtime or non-Light/Switch group types are displayed as read-only and cannot be destructively taken over.
 - Clone physical group requires selecting a new physical controller.
 - Template creates a clean editable draft.
 - Missing entity appears in Repair Center and can be remapped.
-- Undo restores the last Multi-Way/Smart configuration snapshot.
+- Undo restores ordinary Multi-Way/Smart configuration snapshots but refuses to erase a completed takeover whose native source helper has already been removed.
+- Full restore refuses a backup that would silently remove a completed takeover absent from that backup.
 - Full backup restores both engines and rejects malformed/future schema data.
 - Configuration Lock blocks create/edit/delete/import/remap operations.
 - Full System Test totals match actual available/offline entities.

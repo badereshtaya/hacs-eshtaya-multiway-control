@@ -9,7 +9,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import ServiceValidationError
-from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import config_validation as cv, entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.typing import ConfigType
 
@@ -224,6 +224,12 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Delete persistent data and stale repair issues when the entry is removed."""
     store = MultiWayStore(hass)
     smart_store = SmartGroupStore(hass)
+    await smart_store.async_load()
+    entity_registry = er.async_get(hass)
+    for entity_id in smart_store.hidden_members_owned():
+        entity_entry = entity_registry.async_get(entity_id)
+        if entity_entry and entity_entry.hidden_by == er.RegistryEntryHider.INTEGRATION:
+            entity_registry.async_update_entity(entity_id, hidden_by=None)
     await store.async_remove()
     await smart_store.async_remove()
 

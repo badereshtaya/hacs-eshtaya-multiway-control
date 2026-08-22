@@ -9,7 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from homeassistant.core import Context, Event, HomeAssistant, State, callback
-from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers import entity_registry as er, issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_state_change_event, async_track_time_interval
 
@@ -121,7 +121,41 @@ class SmartGroupManager:
             self._unsub = async_track_state_change_event(
                 self.hass, list(self._entity_groups), self._async_state_event
             )
+        await self._async_reconcile_hidden_members()
         async_dispatcher_send(self.hass, SIGNAL_SMART_GROUPS_UPDATED)
+
+    async def _async_reconcile_hidden_members(self) -> None:
+        """Apply hide-members policy and remember only visibility owned by us."""
+        desired = {
+            member["entity_id"]
+            for group in self._groups.values()
+            if group.get("hide_members")
+            for member in group.get("members", [])
+        }
+        owned = self.store.hidden_members_owned()
+        registry = er.async_get(self.hass)
+        new_owned = set(owned)
+
+        for entity_id in desired:
+            entry = registry.async_get(entity_id)
+            if entry is None:
+                continue
+            if entry.hidden_by is None:
+                registry.async_update_entity(
+                    entity_id, hidden_by=er.RegistryEntryHider.INTEGRATION
+                )
+                new_owned.add(entity_id)
+            elif entry.hidden_by == er.RegistryEntryHider.INTEGRATION:
+                new_owned.add(entity_id)
+
+        for entity_id in owned - desired:
+            entry = registry.async_get(entity_id)
+            if entry and entry.hidden_by == er.RegistryEntryHider.INTEGRATION:
+                registry.async_update_entity(entity_id, hidden_by=None)
+            new_owned.discard(entity_id)
+
+        if new_owned != owned:
+            await self.store.async_set_hidden_members_owned(new_owned)
 
     @staticmethod
     def _new_runtime() -> dict[str, Any]:
@@ -250,14 +284,18 @@ class SmartGroupManager:
             self._refresh_runtime(group_id)
             self._notify(group_id)
             return
-        if self._record_flap(group, entity_id):
-            self._refresh_runtime(group_id)
-            self._notify(group_id)
-            return
 
         old_state = old.state if old else None
         new_state = new.state
         if old_state == new_state:
+            # Attribute-only updates (brightness/color/effect/etc.) must refresh
+            # the virtual aggregate entity, but are not physical control edges.
+            self._refresh_runtime(group_id)
+            self._notify(group_id)
+            return
+        if self._record_flap(group, entity_id):
+            self._refresh_runtime(group_id)
+            self._notify(group_id)
             return
 
         controller = group.get("controller_entity")
@@ -310,7 +348,13 @@ class SmartGroupManager:
         return None
 
     async def async_set_state(
-        self, group_id: str, state: str, *, source: str = "virtual", origin: str = "service"
+        self,
+        group_id: str,
+        state: str,
+        *,
+        source: str = "virtual",
+        origin: str = "service",
+        service_data: dict[str, Any] | None = None,
     ) -> bool:
         if state not in VALID_STATES:
             raise ValueError("State must be on or off")
@@ -373,14 +417,18 @@ class SmartGroupManager:
                     results.extend(
                         await asyncio.gather(
                             *(
-                                self._async_command_entity(group, entity_id, state, txid)
+                                self._async_command_entity(
+                                    group, entity_id, state, txid, service_data=service_data
+                                )
                                 for entity_id in targets
                             )
                         )
                     )
             else:
                 for entity_id in targets:
-                    ok = await self._async_command_entity(group, entity_id, state, txid)
+                    ok = await self._async_command_entity(
+                        group, entity_id, state, txid, service_data=service_data
+                    )
                     results.append(ok)
                     if not ok and group["behavior"].get("failure_policy") == SMART_FAILURE_STOP:
                         break
@@ -410,13 +458,19 @@ class SmartGroupManager:
             return success
 
     async def _async_command_entity(
-        self, group: dict[str, Any], entity_id: str, state: str, txid: str
+        self,
+        group: dict[str, Any],
+        entity_id: str,
+        state: str,
+        txid: str,
+        *,
+        service_data: dict[str, Any] | None = None,
     ) -> bool:
         current = self.hass.states.get(entity_id)
         if current is None or current.state in UNAVAILABLE_STATES:
             self._metric(group["id"], entity_id, False, None)
             return False
-        if current.state == state:
+        if current.state == state and not service_data:
             self._metric(group["id"], entity_id, True, 0)
             return True
         domain = self._domain(entity_id)
@@ -427,10 +481,16 @@ class SmartGroupManager:
         start = monotonic()
         try:
             blocking = group["behavior"].get("performance_mode") == PERFORMANCE_SAFE
+            data: dict[str, Any] = {"entity_id": entity_id}
+            if domain == "light" and service_data:
+                if state == "on":
+                    data.update(service_data)
+                elif "transition" in service_data:
+                    data["transition"] = service_data["transition"]
             await self.hass.services.async_call(
                 domain,
                 f"turn_{state}",
-                {"entity_id": entity_id},
+                data,
                 blocking=blocking,
                 context=context,
             )
@@ -655,20 +715,36 @@ class SmartGroupManager:
         runtime["health"] = health
 
     def _compute_state(self, group: dict[str, Any]) -> str:
-        states = []
+        states: list[str] = []
+        takeover_compat = bool((group.get("migration") or {}).get("takeover"))
         for member in group["members"]:
             if not member.get("enabled", True) or self._is_quarantined(
                 group["id"], member["entity_id"]
             ):
                 continue
             state = self.hass.states.get(member["entity_id"])
-            if state and state.state in VALID_STATES:
+            if takeover_compat:
+                states.append(state.state if state is not None else "unavailable")
+            elif state and state.state in VALID_STATES:
                 states.append(state.state)
         if not states:
             return "unavailable"
-        if group["behavior"].get("state_policy") == SMART_STATE_ALL:
-            return "on" if all(state == "on" for state in states) else "off"
-        return "on" if any(state == "on" for state in states) else "off"
+
+        all_policy = group["behavior"].get("state_policy") == SMART_STATE_ALL
+        if takeover_compat:
+            valid = [state not in UNAVAILABLE_STATES for state in states]
+            valid_state = all(valid) if all_policy else any(valid)
+            if not valid_state:
+                return "unavailable"
+            command_states = [state for state in states if state in VALID_STATES]
+        else:
+            command_states = states
+
+        if not command_states:
+            return "unavailable"
+        if all_policy:
+            return "on" if all(state == "on" for state in command_states) else "off"
+        return "on" if any(state == "on" for state in command_states) else "off"
 
     def _mismatches(self, group: dict[str, Any], expected: str) -> list[str]:
         result = []

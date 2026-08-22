@@ -13,7 +13,7 @@ No YAML automations are required. The integration coordinates entities that alre
 
 > Domain: `eshtaya_multiway`  
 > Repository: `badereshtaya/hacs-eshtaya-multiway-control`  
-> Current release: **3.0.0**
+> Current release: **3.1.0**
 
 ## Requirements
 
@@ -148,8 +148,15 @@ light.ground_floor_group
 - Area-aware entity filtering.
 - Quick virtual group creation from an Area.
 - Auto-pair suggestions for Multi-Way commissioning.
-- Discover Home Assistant native group helpers.
-- **Import as Smart Group** without modifying the original Home Assistant group.
+- Discover existing Home Assistant native group helpers directly inside the **Smart Groups** section and Commissioning.
+- **Take Over with Eshtaya** performs a transactional migration for UI-created Home Assistant Light Groups and Switch Groups.
+- The replacement keeps the **exact same `entity_id`** so dashboards, automations, scenes, voice-assistant references and scripts that target that entity ID do not need to be rewritten.
+- The original Home Assistant Group helper is deleted **only after** the Eshtaya replacement has claimed and verified the original entity ID.
+- Takeover preserves the group name, ordered members, Any/All policy, `hide_members`, Area and user-facing Entity Registry metadata such as aliases, labels, icon, hidden/disabled state and custom name.
+- Taken-over Light Groups forward brightness, color temperature, color, effect, flash and transition commands to compatible light members and aggregate the main light capabilities/state.
+- If takeover fails before the original helper is removed, the migration rolls back to the original helper and entity ID instead of leaving a half-migrated group.
+- Legacy/YAML/runtime groups and native group types that Eshtaya cannot yet reproduce with the same domain/behavior remain read-only and cannot be destructively taken over.
+- Legacy V3.0.1 copy-import metadata remains readable for backward compatibility, but new migrations use Take Over rather than copy/import.
 - Smart Group templates.
 - Clone groups safely; physical clones intentionally require selecting a new controller.
 - Full non-destructive system test.
@@ -161,8 +168,8 @@ light.ground_floor_group
 - Missing entity detection across Multi-Way and Smart Groups.
 - Replacement/remap wizard from the Control Center.
 - Automatic configuration snapshots before destructive changes.
-- Undo for each engine.
-- Full platform backup/restore with rollback on failed import.
+- Undo for ordinary configuration changes; completed native-group takeovers are protected from generic Undo because the original Home Assistant helper has already been intentionally removed.
+- Full platform backup/restore with rollback on failed import; restore is blocked if it would silently remove a completed takeover that is absent from the backup.
 - Configuration Lock protects add/edit/delete/remap/import while runtime control remains available.
 - Versioned storage schemas reject future unsupported data instead of silently rewriting it.
 - Home Assistant Repairs, Diagnostics and System Health support.
@@ -205,7 +212,7 @@ Virtual Smart Groups expose a control `light`/`switch`. All Smart Groups expose:
 
 ## Updating
 
-Releases are versioned with Git tags such as `v3.0.0`. HACS discovers the published GitHub Release and offers it as an update.
+Releases are versioned with Git tags such as `v3.1.0`. HACS discovers the published GitHub Release and offers it as an update.
 
 ## Repository validation
 

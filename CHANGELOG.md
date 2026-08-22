@@ -1,5 +1,33 @@
 # Changelog
 
+## 3.1.0 - 2026-08-22
+
+- Replaced copy-style Home Assistant group import with transactional **Take Over** migration.
+- Preserves the original Light/Switch Group `entity_id` exactly, so dashboards, automations, scenes, and voice integrations keep working without entity-ID edits.
+- Preserves group name, ordered members, Any/All policy, hide-members behavior, Area, icon, labels, aliases, and Entity Registry overrides.
+- Verifies the Eshtaya replacement before deleting the original Home Assistant Group helper.
+- Adds best-effort rollback if takeover fails before source deletion and late-cleanup protection if Home Assistant removes the source entry but raises during cleanup.
+- UI-created Home Assistant Light/Switch Groups are takeover-capable; unsupported legacy/YAML or other group domains remain visible as read-only with an explicit reason.
+- Smart Groups now persist preferred entity IDs, takeover metadata, and managed hide-members ownership.
+- Taken-over Light Groups preserve aggregate brightness/color/effect capabilities and forward brightness, color, effect, flash and transition service data to member lights.
+- Attribute-only light updates refresh the aggregate entity without being counted as control edges or flapping.
+- Generic Smart Group Undo and full-restore replacement are guarded so they cannot accidentally erase a completed destructive takeover whose original Home Assistant helper has already been removed.
+- The retired V3.0.1 copy-import WebSocket endpoint now refuses destructive work, protecting stale cached frontends from triggering an unconfirmed takeover.
+
+## 3.0.1 - 2026-08-22
+
+### Fixed
+
+- Fixed Smart Group editor crash `domains.has is not a function` by accepting both Array and Set domain collections in entity datalists.
+- Existing Home Assistant groups are now shown directly inside the Smart Groups section instead of being discoverable only from Commissioning.
+- Imported Home Assistant groups are tracked by source entity to prevent accidental duplicate imports.
+
+### Added
+
+- Imported Smart Groups show their original Home Assistant group source.
+- Added **Refresh from Home Assistant** to update an imported Smart Group's member list while preserving Smart Group behavior, enabled-member choices for unchanged members, and the original Home Assistant group.
+- Clear read-only labels and import semantics for native Home Assistant groups.
+
 ## 3.0.0 - 2026-08-22
 
 ### Added

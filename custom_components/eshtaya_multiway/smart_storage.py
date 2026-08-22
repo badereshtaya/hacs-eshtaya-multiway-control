@@ -56,6 +56,7 @@ class SmartGroupStore:
                 "installer_mode": True,
                 "config_locked": False,
                 "snapshot_limit": 25,
+                "hidden_members_owned": [],
             },
             "groups": [],
             "templates": [],
@@ -76,6 +77,9 @@ class SmartGroupStore:
         data["settings"].update(loaded.get("settings") or {})
         data["settings"]["snapshot_limit"] = max(
             5, min(100, int(data["settings"].get("snapshot_limit", 25)))
+        )
+        data["settings"]["hidden_members_owned"] = list(
+            dict.fromkeys(data["settings"].get("hidden_members_owned") or [])
         )
         data["templates"] = list(loaded.get("templates") or [])
         data["snapshots"] = list(loaded.get("snapshots") or [])[-50:]
@@ -166,9 +170,22 @@ class SmartGroupStore:
         async with self._lock:
             merged = {**self._data["settings"], **settings}
             merged["snapshot_limit"] = max(5, min(100, int(merged.get("snapshot_limit", 25))))
+            merged["hidden_members_owned"] = list(
+                dict.fromkeys(merged.get("hidden_members_owned") or [])
+            )
             self._data["settings"] = merged
             await self._save()
             return deepcopy(merged)
+
+    def hidden_members_owned(self) -> set[str]:
+        """Return members whose hidden state is owned by this integration."""
+        return set(self._data["settings"].get("hidden_members_owned") or [])
+
+    async def async_set_hidden_members_owned(self, entity_ids: set[str]) -> None:
+        """Persist hidden-member ownership without creating a user snapshot."""
+        async with self._lock:
+            self._data["settings"]["hidden_members_owned"] = sorted(entity_ids)
+            await self._save()
 
     async def async_save_template(self, name: str, group_id: str) -> dict[str, Any]:
         group = self.get(group_id)
@@ -203,6 +220,21 @@ class SmartGroupStore:
             self._assert_unlocked()
             if not self._data["snapshots"]:
                 raise ValueError("No snapshot is available")
+            snap = self._data["snapshots"][-1]
+            snapshot_group_ids = {group["id"] for group in snap["groups"]}
+            protected_takeovers = [
+                group
+                for group in self._data["groups"]
+                if (group.get("migration") or {}).get("takeover")
+                and group["id"] not in snapshot_group_ids
+            ]
+            if protected_takeovers:
+                names = ", ".join(group["name"] for group in protected_takeovers[:3])
+                raise ValueError(
+                    "Undo cannot roll back a completed Home Assistant Group takeover "
+                    f"({names}). The original helper was intentionally removed; edit or "
+                    "delete the Eshtaya group explicitly instead."
+                )
             snap = self._data["snapshots"].pop()
             self._data["groups"] = deepcopy(snap["groups"])
             await self._save()
@@ -231,7 +263,6 @@ class SmartGroupStore:
 
         async with self._lock:
             self._assert_unlocked()
-            self._snapshot("before_import", None)
             if replace:
                 candidate_groups = imported
                 candidate_templates = imported_templates
@@ -253,7 +284,25 @@ class SmartGroupStore:
                     candidate_templates.append(item)
                     template_ids.add(item["id"])
 
+            protected_takeovers = [
+                group
+                for group in self._data["groups"]
+                if (group.get("migration") or {}).get("takeover")
+            ]
+            candidate_ids = {group["id"] for group in candidate_groups}
+            missing_takeovers = [
+                group for group in protected_takeovers if group["id"] not in candidate_ids
+            ]
+            if missing_takeovers:
+                names = ", ".join(group["name"] for group in missing_takeovers[:3])
+                raise ValueError(
+                    "Restore would remove a completed Home Assistant Group takeover "
+                    f"({names}) whose original helper no longer exists. Include the "
+                    "taken-over group in the backup or delete it explicitly first."
+                )
+
             self._validate_controller_uniqueness(candidate_groups)
+            self._snapshot("before_import", None)
             self._data["groups"] = candidate_groups
             self._data["settings"] = imported_settings
             self._data["templates"] = candidate_templates
@@ -349,6 +398,18 @@ class SmartGroupStore:
             "maintenance": bool(payload.get("maintenance", False)),
             "locked": bool(payload.get("locked", False)),
             "favorite": bool(payload.get("favorite", False)),
+            "source_group_entity": (
+                str(payload.get("source_group_entity")).strip()
+                if payload.get("source_group_entity")
+                else None
+            ),
+            "preferred_entity_id": (
+                str(payload.get("preferred_entity_id")).strip()
+                if payload.get("preferred_entity_id")
+                else None
+            ),
+            "hide_members": bool(payload.get("hide_members", False)),
+            "migration": deepcopy(payload.get("migration")) if isinstance(payload.get("migration"), dict) else None,
             "behavior": behavior,
             "created_at": payload.get("created_at") or now,
             "updated_at": payload.get("updated_at") or now,

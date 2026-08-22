@@ -79,7 +79,7 @@ Each logical group is represented as its own Home Assistant virtual device. Plat
 
 ## Commissioning
 
-The frontend reads Home Assistant Area and Entity registries, prioritizes compatible entities, offers Learn Mode, discovers native HA groups and can import them as independent Smart Groups. Native groups are not mutated through private storage APIs.
+The frontend reads Home Assistant Area and Entity registries, prioritizes compatible entities, offers Learn Mode and discovers native HA Group helpers. UI-created native Light/Switch Groups can be transactionally **taken over**: the original Entity Registry row is moved to a temporary rollback ID, an Eshtaya Smart Group claims and verifies the exact original entity ID, then Home Assistant removes the old Group Config Entry through the public Config Entry API. No Home Assistant `.storage` file is edited directly. If any pre-removal step fails, the original helper and entity ID are restored. Unsupported legacy/YAML/runtime group types remain read-only.
 
 ## Repairs and diagnostics
 

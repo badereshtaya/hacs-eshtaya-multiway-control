@@ -7,7 +7,8 @@ from homeassistant.components import websocket_api
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers import area_registry as ar
+
+from .native_group_migration import async_take_over_group, native_group_entries
 
 from .const import (
     DATA_RUNTIME,
@@ -114,6 +115,8 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
         ws_smart_diagnostics,
         ws_smart_ha_groups,
         ws_smart_import_ha_group,
+        ws_smart_takeover_ha_group,
+        ws_smart_refresh_ha_group,
         ws_full_export,
         ws_full_import,
         ws_repair_missing,
@@ -685,30 +688,8 @@ def ws_smart_diagnostics(hass, connection, msg) -> None:
 
 
 def _native_group_entries(hass: HomeAssistant) -> list[dict]:
-    registry = er.async_get(hass)
-    area_registry = ar.async_get(hass)
-    rows = []
-    for state in hass.states.async_all():
-        entity_id = state.entity_id
-        entry = registry.async_get(entity_id)
-        platform = getattr(entry, "platform", None) if entry else None
-        members = state.attributes.get("entity_id")
-        if not isinstance(members, (list, tuple)) or not members:
-            continue
-        if entity_id.split(".", 1)[0] != "group" and platform != "group":
-            continue
-        area_id = getattr(entry, "area_id", None) if entry else None
-        area = area_registry.async_get_area(area_id) if area_id else None
-        rows.append({
-            "entity_id": entity_id,
-            "name": state.attributes.get("friendly_name") or entity_id,
-            "state": state.state,
-            "members": list(members),
-            "area_id": area_id,
-            "area_name": area.name if area else None,
-            "platform": platform,
-        })
-    return rows
+    """Compatibility wrapper around the native Group helper inspector."""
+    return native_group_entries(hass)
 
 
 @websocket_api.require_admin
@@ -722,34 +703,109 @@ def ws_smart_ha_groups(hass, connection, msg) -> None:
 
 
 @websocket_api.require_admin
-@websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/smart/import_ha_group", vol.Required("entity_id"): str, vol.Optional("name"): str})
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/smart/import_ha_group",
+        vol.Required("entity_id"): str,
+    }
+)
+@callback
+def ws_smart_import_ha_group(hass, connection, msg) -> None:
+    """Reject the retired copy-import endpoint so stale UIs cannot delete helpers."""
+    connection.send_error(
+        msg["id"],
+        "native_group_import_retired",
+        "Group import was replaced by transactional Take Over in V3.1. "
+        "Refresh the Eshtaya Control Center and use Take Over.",
+    )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/smart/takeover_ha_group",
+        vol.Required("entity_id"): str,
+    }
+)
 @websocket_api.async_response
-async def ws_smart_import_ha_group(hass, connection, msg) -> None:
+async def ws_smart_takeover_ha_group(hass, connection, msg) -> None:
+    """Take full ownership of a UI-created Home Assistant Group helper."""
     try:
         _ensure_config_unlocked(hass)
         data = _runtime_all(hass)
-        found = next((item for item in _native_group_entries(hass) if item["entity_id"] == msg["entity_id"]), None)
-        if not found:
-            raise ValueError("Home Assistant group was not found")
-        members = [m for m in found["members"] if m.split(".", 1)[0] in SMART_MEMBER_DOMAINS]
-        if not members:
-            raise ValueError("The Home Assistant group has no compatible commandable members")
-        domains = {m.split(".", 1)[0] for m in members}
-        virtual_type = VIRTUAL_LIGHT if domains == {"light"} else VIRTUAL_SWITCH
-        group = await data["smart_store"].async_create({
-            "name": msg.get("name") or found["name"],
-            "kind": SMART_KIND_VIRTUAL,
-            "controller_entity": None,
-            "members": [{"entity_id": m, "enabled": True} for m in members],
-            "virtual_type": virtual_type,
-            "area_id": found.get("area_id"),
-            "behavior": {},
-        })
-        await data["smart_manager"].async_reload()
-        connection.send_result(msg["id"], {"group": group, "source": found, "original_unchanged": True})
+        result = await async_take_over_group(
+            hass,
+            data["smart_store"],
+            data["smart_manager"],
+            msg["entity_id"],
+        )
+        connection.send_result(msg["id"], result)
     except Exception as err:  # noqa: BLE001
-        connection.send_error(msg["id"], "native_group_import_failed", str(err))
+        connection.send_error(msg["id"], "native_group_takeover_failed", str(err))
 
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/smart/refresh_ha_group",
+        vol.Required("group_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_smart_refresh_ha_group(hass, connection, msg) -> None:
+    """Refresh an imported Smart Group membership from its HA source group."""
+    try:
+        _ensure_config_unlocked(hass)
+        data = _runtime_all(hass)
+        group = data["smart_store"].get(msg["group_id"])
+        if not group:
+            raise ValueError("Smart Group not found")
+        source_entity = group.get("source_group_entity")
+        if not source_entity:
+            raise ValueError("This Smart Group was not imported from Home Assistant")
+        found = next(
+            (item for item in _native_group_entries(hass) if item["entity_id"] == source_entity),
+            None,
+        )
+        if not found:
+            raise ValueError("The source Home Assistant group no longer exists")
+        members = [
+            member
+            for member in found["members"]
+            if member.split(".", 1)[0] in SMART_MEMBER_DOMAINS
+        ]
+        if not members:
+            raise ValueError("The source group has no compatible commandable members")
+        existing_enabled = {
+            item["entity_id"]: bool(item.get("enabled", True))
+            for item in group.get("members", [])
+        }
+        updated = await data["smart_store"].async_update(
+            group["id"],
+            {
+                "members": [
+                    {
+                        "entity_id": member,
+                        "enabled": existing_enabled.get(member, True),
+                    }
+                    for member in members
+                ],
+                "area_id": found.get("area_id") or group.get("area_id"),
+                "source_group_entity": source_entity,
+            },
+        )
+        await data["smart_manager"].async_reload()
+        connection.send_result(
+            msg["id"],
+            {
+                "group": updated,
+                "source": found,
+                "members_refreshed": len(members),
+                "original_unchanged": True,
+            },
+        )
+    except Exception as err:  # noqa: BLE001
+        connection.send_error(msg["id"], "native_group_refresh_failed", str(err))
 
 @websocket_api.require_admin
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/backup/full_export"})

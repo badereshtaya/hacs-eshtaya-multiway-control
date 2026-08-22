@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EntityCategory
+from homeassistant.const import ATTR_ASSUMED_STATE, EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
@@ -148,6 +148,28 @@ class SmartGroupVirtualSwitch(SmartGroupEntity, SwitchEntity):
             group
             and group["kind"] == SMART_KIND_VIRTUAL
             and group["virtual_type"] == VIRTUAL_SWITCH
+        )
+
+    @property
+    def available(self) -> bool:
+        """Match native group availability from the current member states."""
+        group = self.group or {}
+        states = [
+            self.hass.states.get(member["entity_id"])
+            for member in group.get("members", [])
+            if member.get("enabled", True)
+        ]
+        return any(state is not None and state.state != "unavailable" for state in states)
+
+    @property
+    def assumed_state(self) -> bool:
+        """Match native Switch Group assumed-state behavior."""
+        group = self.group or {}
+        return any(
+            bool(state.attributes.get(ATTR_ASSUMED_STATE))
+            for member in group.get("members", [])
+            if member.get("enabled", True)
+            and (state := self.hass.states.get(member["entity_id"])) is not None
         )
 
     @property

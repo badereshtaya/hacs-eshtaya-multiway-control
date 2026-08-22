@@ -29,6 +29,15 @@ class SmartGroupEntity(Entity):
         self.hass = hass
         self.group_id = group_id
         self._attr_unique_id = f"smart_{group_id}_{suffix}"
+        group = hass.data.get(DOMAIN, {}).get(DATA_RUNTIME, {}).get("smart_store")
+        group = group.get(group_id) if group else None
+        if suffix in {"control_light", "control_switch"}:
+            # The control entity is the group itself, so keep its visible name clean.
+            self._attr_translation_key = None
+            self._attr_name = None
+            preferred = group.get("preferred_entity_id") if group else None
+            if preferred and "." in preferred:
+                self._attr_suggested_object_id = preferred.split(".", 1)[1]
 
     @property
     def _runtime_data(self) -> dict[str, Any]:
@@ -87,6 +96,9 @@ class SmartGroupEntity(Entity):
             "quarantined": status.get("quarantined", []),
             "maintenance": bool(group.get("maintenance")),
             "locked": bool(group.get("locked")),
+            "hide_members": bool(group.get("hide_members")),
+            "preferred_entity_id": group.get("preferred_entity_id"),
+            "takeover_managed": bool((group.get("migration") or {}).get("takeover")),
         }
 
     def _still_expected(self, group: dict[str, Any] | None) -> bool:
