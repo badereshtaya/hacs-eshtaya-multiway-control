@@ -4,7 +4,7 @@
     "step": {
       "user": {
         "title": "نظام Eshtaya Multi-Way Control",
-        "description": "ثبّت وحدة تحكم الفكسل البرمجية. بعد الإعداد استخدم Multi-Way Control من القائمة الجانبية لإنشاء وإدارة المجموعات."
+        "description": "ثبّت مركز Eshtaya للتحكم. بعد الإعداد استخدم Eshtaya Control Center لإدارة الفكسلات، Smart Groups، الفحص والصيانة."
       }
     },
     "abort": {
@@ -15,6 +15,9 @@
     "light": {
       "group_control": {
         "name": "التحكم"
+      },
+      "smart_group_control": {
+        "name": "تحكم الجروب"
       }
     },
     "switch": {
@@ -23,6 +26,12 @@
       },
       "group_enabled": {
         "name": "المزامنة"
+      },
+      "smart_group_control": {
+        "name": "تحكم الجروب"
+      },
+      "smart_group_enabled": {
+        "name": "تفعيل الجروب"
       }
     },
     "sensor": {
@@ -34,15 +43,33 @@
       },
       "last_latency": {
         "name": "آخر زمن استجابة"
+      },
+      "smart_group_health": {
+        "name": "حالة الجروب"
+      },
+      "smart_group_quality": {
+        "name": "جودة الجروب"
+      },
+      "smart_group_last_source": {
+        "name": "آخر مصدر"
+      },
+      "smart_group_latency": {
+        "name": "آخر زمن استجابة"
       }
     },
     "binary_sensor": {
       "in_sync": {
         "name": "متزامن"
+      },
+      "smart_group_healthy": {
+        "name": "الجروب سليم"
       }
     },
     "button": {
       "sync_now": {
+        "name": "مزامنة الآن"
+      },
+      "smart_group_sync": {
         "name": "مزامنة الآن"
       }
     }
@@ -59,6 +86,10 @@
     "output_unresponsive": {
       "title": "الخرج الفعلي لا يؤكد الأوامر",
       "description": "الخرج {entity} في المجموعة {group} فشل عدة مرات في تأكيد الأوامر. افحص اتصال الجهاز ثم استخدم مزامنة الآن بعد عودته للعمل."
+    },
+    "smart_group_fault": {
+      "title": "مشكلة في Smart Group",
+      "description": "الجروب {group} لديه مشكلة بالمزامنة: {error}"
     }
   },
   "selector": {
@@ -125,6 +156,40 @@
         "group_id": {
           "name": "معرّف المجموعة",
           "description": "المعرّف الداخلي للمجموعة."
+        }
+      }
+    },
+    "set_smart_group_state": {
+      "name": "تغيير حالة Smart Group",
+      "description": "تشغيل أو إطفاء جميع أعضاء Smart Group من خلال المحرك الآمن.",
+      "fields": {
+        "group_id": {
+          "name": "معرّف الجروب",
+          "description": "المعرّف الداخلي."
+        },
+        "state": {
+          "name": "الحالة",
+          "description": "تشغيل أو إيقاف."
+        }
+      }
+    },
+    "sync_smart_group": {
+      "name": "مزامنة Smart Group",
+      "description": "إعادة توحيد حالة أعضاء Smart Group.",
+      "fields": {
+        "group_id": {
+          "name": "معرّف الجروب",
+          "description": "المعرّف الداخلي."
+        }
+      }
+    },
+    "test_smart_group": {
+      "name": "فحص Smart Group",
+      "description": "إرجاع تقرير تشخيص غير هدّام للجروب.",
+      "fields": {
+        "group_id": {
+          "name": "معرّف الجروب",
+          "description": "المعرّف الداخلي."
         }
       }
     }

@@ -1,5 +1,75 @@
 # Changelog
 
+## 3.0.0 - 2026-08-22
+
+### Added
+
+- New **Eshtaya Control Center** dashboard with separate Multi-Way, Smart Groups, Commissioning, Health & Diagnostics, Activity and Settings sections.
+- Independent high-reliability **Smart Groups** engine.
+- Physical-controller Smart Groups and virtual aggregate `light`/`switch` groups.
+- Any-ON / All-ON state policy and controller-only / bidirectional direction policy.
+- Smart Group Instant, Balanced and Safe execution profiles.
+- Smart Group member verification, retry, failure policy and optional staggered dispatch.
+- Scene batch protection/adoption.
+- Flapping detection plus automatic and manual member quarantine/release.
+- Per-member quality score, command/failure counters and adaptive latency metrics.
+- Smart Group maintenance mode, favorites and per-group configuration lock.
+- Area-aware commissioning, quick Area group creation and Multi-Way auto-pair suggestions.
+- Discovery and safe import of native Home Assistant group helpers without modifying the originals.
+- Smart Group templates and safe cloning workflow.
+- Full-system non-destructive commissioning test and downloadable report.
+- Unified missing-entity Repair Center and cross-engine entity remapping.
+- Automatic snapshots and Undo for both engines.
+- Unified full backup/restore with transactional rollback.
+- Project/Installer settings and global Configuration Lock.
+- Multi-Way fallback output and source-authority policy exposed in the UI.
+- Smart Group FIFO edge queue so rapid controller/member changes preserve Home Assistant arrival order.
+- Privacy-conscious diagnostics and combined System Health summary.
+
+### Fixed
+
+- Smart Group UI actions are fully connected to the backend instead of being presentation-only.
+- Changing a Smart Group virtual control type removes only the obsolete control entity and preserves diagnostic/config entities.
+- Full-system Multi-Way readiness now validates actual member availability instead of treating every returned snapshot as a pass.
+- Smart Group editor drafts survive live runtime updates, member changes and Learn sessions.
+
+### Changed
+
+- Product scope expands from Multi-Way synchronization into a full switch/group commissioning and reliability platform.
+- Management panel remains admin-only; runtime control remains available through native entities and service actions.
+
+## 2.2.0 - 2026-08-22
+
+### Added
+
+- Learn Mode beside the physical output and every controller field.
+- Ranked learn candidates with automatic controller-mode recommendation.
+- Per-group FIFO Edge Queue so rapid physical transitions are processed in exact arrival order.
+- Latest Physical State Wins reconciliation for mirror controllers.
+- Configurable rapid-source authority window to reject stale Main echoes only after fast opposite edges.
+- Home Assistant Context-aware command echo tracking to discard stale integration-generated echoes.
+- Real end-to-end Test Center: Toggle/Press now propagates through the complete multi-way group.
+- Rapid x4 physical stress test with final-state verification.
+- Four-step group setup wizard with persistent draft state and inline Learn Mode.
+- Per-member command/failure/latency diagnostics and a live transaction timeline in Test Center.
+- Offline-Main latest-state queue: only the newest requested physical state is retained and applied on recovery.
+- Engine-delay and end-to-end latency diagnostics in Test Center/runtime data.
+- Rapid-edge/stale-transaction diagnostic counters.
+
+### Fixed
+
+- Opposite rapid edges such as `OFF -> ON -> OFF` are never discarded by debounce.
+- An older background confirmation or retry cannot override a newer physical state.
+- The source controller is no longer written back during its own transaction.
+- Stale command echoes carrying an older Home Assistant Context cannot become new physical input.
+- Closing Test Center no longer performs an implicit output-authority sync that could overwrite a just-tested final state.
+
+### Changed
+
+- Debounce now suppresses duplicate semantic input only; opposite ON/OFF edges always pass.
+- Test Center exercises the same runtime path as a real wall-switch change instead of isolation mode.
+- Learn Mode keeps the group editor draft and scroll position intact.
+
 ## 2.1.0 - 2026-08-22
 
 ### Added

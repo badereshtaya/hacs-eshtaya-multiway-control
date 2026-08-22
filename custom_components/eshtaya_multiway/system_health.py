@@ -8,11 +8,7 @@ from .const import DATA_RUNTIME, DOMAIN, VERSION
 
 
 @callback
-def async_register(
-    hass: HomeAssistant, register: system_health.SystemHealthRegistration
-) -> None:
-    """Register integration system health information."""
-
+def async_register(hass: HomeAssistant, register: system_health.SystemHealthRegistration) -> None:
     async def system_health_info() -> dict:
         data = hass.data.get(DOMAIN, {}).get(DATA_RUNTIME)
         if not data:
@@ -20,7 +16,7 @@ def async_register(
         return {
             "version": VERSION,
             "loaded": True,
-            **data["manager"].summary(),
+            "multiway": data["manager"].summary(),
+            "smart_groups": data["smart_manager"].summary(),
         }
-
     register.async_register_info(system_health_info)

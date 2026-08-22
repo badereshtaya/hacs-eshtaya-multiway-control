@@ -20,6 +20,7 @@ from .const import (
     MODE_MIRROR,
     OUTPUT_DOMAINS,
     PERFORMANCE_MODES,
+    SOURCE_POLICIES,
     SCHEMA_VERSION,
     STORAGE_KEY,
     STORAGE_VERSION,
@@ -51,6 +52,7 @@ class MultiWayStore:
             "schema_version": SCHEMA_VERSION,
             "settings": deepcopy(DEFAULT_SETTINGS),
             "groups": [],
+            "snapshots": [],
         }
 
     async def async_load(self) -> None:
@@ -80,6 +82,7 @@ class MultiWayStore:
                 normalized = self._normalize_group(group, keep_id=True)
                 self._validate_group(normalized)
                 result["groups"].append(normalized)
+            result["snapshots"] = list(data.get("snapshots") or [])[-25:]
             return result
 
         # Legacy structure: {groups:[{id,name,main,secondaries,enabled}]}
@@ -129,6 +132,10 @@ class MultiWayStore:
         settings.update(self._data.get("settings") or {})
         return settings
 
+    def snapshots(self) -> list[dict[str, Any]]:
+        """Return recent automatic configuration snapshots."""
+        return deepcopy(self._data.get("snapshots") or [])
+
     def get(self, group_id: str) -> dict[str, Any] | None:
         """Return one group."""
         for group in self._data["groups"]:
@@ -142,6 +149,7 @@ class MultiWayStore:
             group = self._normalize_group(payload, keep_id=False)
             self._validate_group(group)
             self._validate_no_overlap(group, ignore_id=None)
+            self._snapshot("before_create")
             self._data["groups"].append(group)
             await self._store.async_save(self._data)
             return deepcopy(group)
@@ -156,6 +164,7 @@ class MultiWayStore:
             group = self._normalize_group(merged, keep_id=True)
             self._validate_group(group)
             self._validate_no_overlap(group, ignore_id=group_id)
+            self._snapshot("before_update")
             for index, current in enumerate(self._data["groups"]):
                 if current["id"] == group_id:
                     self._data["groups"][index] = group
@@ -167,6 +176,7 @@ class MultiWayStore:
         """Delete a group."""
         async with self._lock:
             before = len(self._data["groups"])
+            self._snapshot("before_delete")
             self._data["groups"] = [
                 group for group in self._data["groups"] if group["id"] != group_id
             ]
@@ -201,8 +211,10 @@ class MultiWayStore:
             self._validate_group(group)
 
         async with self._lock:
+            self._snapshot("before_import")
             if replace:
                 candidate = deepcopy(migrated)
+                candidate["snapshots"] = deepcopy(self._data.get("snapshots") or [])
             else:
                 candidate = deepcopy(self._data)
                 current_ids = {group["id"] for group in candidate["groups"]}
@@ -212,6 +224,7 @@ class MultiWayStore:
                     for entity_id in {
                         group["output"],
                         *(controller["entity_id"] for controller in group["controllers"]),
+                        *([group["behavior"].get("fallback_output")] if group["behavior"].get("fallback_output") else []),
                     }
                 }
                 for imported in migrated["groups"]:
@@ -221,6 +234,7 @@ class MultiWayStore:
                     requested = {
                         group["output"],
                         *(controller["entity_id"] for controller in group["controllers"]),
+                        *([group["behavior"].get("fallback_output")] if group["behavior"].get("fallback_output") else []),
                     }
                     overlap = used_entities & requested
                     if overlap:
@@ -254,6 +268,61 @@ class MultiWayStore:
             self._data = candidate
             await self._store.async_save(self._data)
             return self.export_data()
+
+    async def async_undo_last(self) -> dict[str, Any]:
+        """Restore the most recent automatic configuration snapshot."""
+        async with self._lock:
+            snapshots = self._data.get("snapshots") or []
+            if not snapshots:
+                raise ValueError("No snapshot is available")
+            snap = snapshots.pop()
+            groups = deepcopy(snap.get("groups") or [])
+            for group in groups:
+                self._validate_group(group)
+            self._data["groups"] = groups
+            await self._store.async_save(self._data)
+            return {"restored": snap.get("created_at"), "reason": snap.get("reason")}
+
+    async def async_remap_entities(self, mapping: dict[str, str]) -> dict[str, Any]:
+        """Replace entity IDs transactionally across Multi-Way groups."""
+        if not isinstance(mapping, dict) or not mapping:
+            raise ValueError("A non-empty entity mapping is required")
+        async with self._lock:
+            self._snapshot("before_remap")
+            candidate = deepcopy(self._data["groups"])
+            for group in candidate:
+                if group["output"] in mapping:
+                    group["output"] = mapping[group["output"]]
+                fallback = group["behavior"].get("fallback_output")
+                if fallback in mapping:
+                    group["behavior"]["fallback_output"] = mapping[fallback]
+                for controller in group["controllers"]:
+                    if controller["entity_id"] in mapping:
+                        controller["entity_id"] = mapping[controller["entity_id"]]
+                group["updated_at"] = _utcnow()
+                self._validate_group(group)
+            seen: set[str] = set()
+            for group in candidate:
+                used = {group["output"], *(c["entity_id"] for c in group["controllers"])}
+                fallback = group["behavior"].get("fallback_output")
+                if fallback:
+                    used.add(fallback)
+                overlap = seen & used
+                if overlap:
+                    raise ValueError(f"Entity {sorted(overlap)[0]} is used more than once")
+                seen.update(used)
+            self._data["groups"] = candidate
+            await self._store.async_save(self._data)
+            return self.export_data()
+
+    def _snapshot(self, reason: str) -> None:
+        snapshots = self._data.setdefault("snapshots", [])
+        snapshots.append({
+            "created_at": _utcnow(),
+            "reason": reason,
+            "groups": deepcopy(self._data.get("groups") or []),
+        })
+        del snapshots[:-25]
 
     def set_last_state(self, group_id: str, state: str) -> None:
         """Persist last confirmed group state with a short write debounce."""
@@ -395,10 +464,21 @@ class MultiWayStore:
         debounce = int(behavior.get("debounce_ms", 120))
         if not 0 <= debounce <= 5000:
             raise ValueError("debounce_ms must be between 0 and 5000")
+        authority_window = int(behavior.get("authority_window_ms", 1800))
+        if not 0 <= authority_window <= 10000:
+            raise ValueError("authority_window_ms must be between 0 and 10000")
         if behavior.get("output_restore_policy") not in {"adopt", "enforce"}:
             raise ValueError("output_restore_policy must be adopt or enforce")
         if behavior.get("performance_mode") not in PERFORMANCE_MODES:
             raise ValueError("performance_mode must be instant, balanced, or safe")
+        if behavior.get("source_policy", "latest_physical") not in SOURCE_POLICIES:
+            raise ValueError("source_policy must be latest_physical or output_authority")
+        fallback = behavior.get("fallback_output")
+        if fallback:
+            if self._entity_domain(fallback) not in OUTPUT_DOMAINS:
+                raise ValueError("fallback_output must be a switch, light, input_boolean, or fan")
+            if fallback == group["output"] or fallback in entity_ids:
+                raise ValueError("Fallback output must be different from the output and controllers")
         for key in ("command_timeout", "max_retries"):
             value = behavior.get(key)
             if value is not None and float(value) < 0:
@@ -406,19 +486,20 @@ class MultiWayStore:
 
     def _validate_no_overlap(self, group: dict[str, Any], ignore_id: str | None) -> None:
         requested = {group["output"], *(c["entity_id"] for c in group["controllers"])}
+        fallback = group["behavior"].get("fallback_output")
+        if fallback:
+            requested.add(fallback)
         for existing in self._data["groups"]:
             if existing["id"] == ignore_id:
                 continue
-            used = {
-                existing["output"],
-                *(c["entity_id"] for c in existing["controllers"]),
-            }
+            used = {existing["output"], *(c["entity_id"] for c in existing["controllers"])}
+            existing_fallback = existing["behavior"].get("fallback_output")
+            if existing_fallback:
+                used.add(existing_fallback)
             overlap = requested & used
             if overlap:
                 entity_id = sorted(overlap)[0]
-                raise ValueError(
-                    f"Entity {entity_id} is already used by group '{existing['name']}'"
-                )
+                raise ValueError(f"Entity {entity_id} is already used by group '{existing['name']}'")
 
     @staticmethod
     def _validate_settings(settings: dict[str, Any]) -> None:

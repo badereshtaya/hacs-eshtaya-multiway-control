@@ -42,3 +42,32 @@ test_group:
       required: true
       selector:
         text:
+
+set_smart_group_state:
+  fields:
+    group_id:
+      required: true
+      selector:
+        text:
+    state:
+      required: true
+      selector:
+        select:
+          translation_key: group_state
+          options:
+            - "on"
+            - "off"
+
+sync_smart_group:
+  fields:
+    group_id:
+      required: true
+      selector:
+        text:
+
+test_smart_group:
+  fields:
+    group_id:
+      required: true
+      selector:
+        text:

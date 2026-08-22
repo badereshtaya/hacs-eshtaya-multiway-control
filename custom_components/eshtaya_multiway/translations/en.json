@@ -4,7 +4,7 @@
     "step": {
       "user": {
         "title": "Eshtaya Multi-Way Control",
-        "description": "Install the multi-way controller. After setup, use Multi-Way Control in the sidebar to create and manage groups."
+        "description": "Install Eshtaya Control Center. After setup, use the sidebar panel to manage Multi-Way groups, Smart Groups, commissioning, diagnostics and maintenance."
       }
     },
     "abort": {
@@ -15,6 +15,9 @@
     "light": {
       "group_control": {
         "name": "Control"
+      },
+      "smart_group_control": {
+        "name": "Group control"
       }
     },
     "switch": {
@@ -23,6 +26,12 @@
       },
       "group_enabled": {
         "name": "Synchronization"
+      },
+      "smart_group_control": {
+        "name": "Group control"
+      },
+      "smart_group_enabled": {
+        "name": "Group enabled"
       }
     },
     "sensor": {
@@ -34,15 +43,33 @@
       },
       "last_latency": {
         "name": "Last latency"
+      },
+      "smart_group_health": {
+        "name": "Group health"
+      },
+      "smart_group_quality": {
+        "name": "Quality score"
+      },
+      "smart_group_last_source": {
+        "name": "Last source"
+      },
+      "smart_group_latency": {
+        "name": "Last latency"
       }
     },
     "binary_sensor": {
       "in_sync": {
         "name": "In sync"
+      },
+      "smart_group_healthy": {
+        "name": "Healthy"
       }
     },
     "button": {
       "sync_now": {
+        "name": "Sync now"
+      },
+      "smart_group_sync": {
         "name": "Sync now"
       }
     }
@@ -59,6 +86,10 @@
     "output_unresponsive": {
       "title": "Multi-way output is not confirming commands",
       "description": "The physical output {entity} in group {group} has repeatedly failed to confirm commands. Check the device/integration connection, then use Sync Now after it is healthy."
+    },
+    "smart_group_fault": {
+      "title": "Smart Group synchronization problem",
+      "description": "Smart Group {group} has a synchronization problem: {error}"
     }
   },
   "selector": {
@@ -125,6 +156,40 @@
         "group_id": {
           "name": "Group ID",
           "description": "Internal group ID."
+        }
+      }
+    },
+    "set_smart_group_state": {
+      "name": "Set Smart Group state",
+      "description": "Turn all Smart Group members on or off through the protected engine.",
+      "fields": {
+        "group_id": {
+          "name": "Group ID",
+          "description": "Internal Smart Group ID."
+        },
+        "state": {
+          "name": "State",
+          "description": "Desired on/off state."
+        }
+      }
+    },
+    "sync_smart_group": {
+      "name": "Sync Smart Group",
+      "description": "Reconcile all Smart Group members.",
+      "fields": {
+        "group_id": {
+          "name": "Group ID",
+          "description": "Internal Smart Group ID."
+        }
+      }
+    },
+    "test_smart_group": {
+      "name": "Test Smart Group",
+      "description": "Return a non-destructive diagnostic report.",
+      "fields": {
+        "group_id": {
+          "name": "Group ID",
+          "description": "Internal Smart Group ID."
         }
       }
     }

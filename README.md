@@ -4,203 +4,223 @@
 
 # Eshtaya Multi-Way Control
 
-A professional Home Assistant custom integration for software-defined **2-way, 3-way and multi-way wall switch control**. It turns one physical load output and multiple smart wall controls into a single reliable virtual light/switch, without YAML automations.
+**Eshtaya Multi-Way Control** is a Home Assistant helper platform for professional software-defined wall-switch control and intelligent aggregate groups. It combines two independent engines in one local Control Center:
 
-> Integration domain: `eshtaya_multiway`. Product name: **Eshtaya Multi-Way Control**.
+1. **Multi-Way** — reliable 2-way / 3-way / N-way control around one real load output and any number of secondary controllers.
+2. **Smart Groups** — physical-controller or virtual groups that control multiple Home Assistant entities as one logical unit.
 
+No YAML automations are required. The integration coordinates entities that already exist in Home Assistant; it does not talk directly to Tuya, Zigbee, KNX, Shelly, or vendor clouds.
+
+> Domain: `eshtaya_multiway`  
+> Repository: `badereshtaya/hacs-eshtaya-multiway-control`  
+> Current release: **3.0.0**
 
 ## Requirements
 
-- Home Assistant **2026.3.0 or newer**.
-- HACS is optional but recommended for installation and updates.
-- The source switch/light/button entities must already exist in Home Assistant through their own integrations.
+- Home Assistant **2026.3.0+**.
+- HACS is optional but recommended.
+- Source entities must already be available in Home Assistant.
 
-## Core architecture
+## Control Center
 
-Each group contains:
+The bundled full-width admin panel is organized into:
 
-- **Physical Output** — the relay/light actually connected to the load and treated as the physical authority.
-- **Controllers** — one or more secondary smart switches/events.
-- **Virtual Entity** — one Home Assistant `light` or `switch` representing the complete group.
-- **Transaction Engine** — output-first command confirmation, loop suppression, retry and reconciliation logic.
+- **Dashboard** — fleet health, quality and quick actions.
+- **Multi-Way** — wall-switch groups and end-to-end testing.
+- **Smart Groups** — physical-controller and virtual aggregate groups.
+- **Commissioning** — Area-aware setup, native group discovery, auto-pair suggestions and templates.
+- **Health & Diagnostics** — missing-entity repair, quality and latency visibility.
+- **Activity** — merged transaction history from both engines.
+- **Settings** — project/installer settings, configuration lock, undo and full backup/restore.
 
-Example:
+The management panel is admin-only. Normal operation is exposed through native Home Assistant entities and service actions.
+
+## Multi-Way engine
+
+A Multi-Way group contains:
 
 ```text
 Living Room
-├── Output: switch.living_main
-├── Controller: switch.entrance      [Mirror]
-├── Controller: switch.sofa          [Mirror]
-└── Virtual: light.living_room_control
+├── Physical output: switch.living_main
+├── Controller: switch.entrance
+├── Controller: switch.sofa
+└── Virtual entity: light.living_room_control
 ```
-
-## Features
-
-### Synchronization engine
-
-- Dynamic 2-way / 3-way / N-way groups.
-- Main/output-first transaction flow.
-- Pending-command suppression prevents ping-pong loops.
-- Per-group serialization protects against race conditions.
-- Debounce protection for noisy wall switches.
-- Command confirmation with configurable timeout/retries.
-- No unnecessary service calls when an entity already matches the target state.
-- Physical output changes immediately become authoritative and synchronize followers.
 
 ### Controller modes
 
-- **Mirror ON/OFF** — controller state represents the same group state.
-- **Toggle on change** — any valid controller transition toggles the group.
-- **Momentary ON** — an ON pulse toggles the group.
-- **Momentary OFF** — an OFF pulse toggles the group.
-- **Event** — every event-state change toggles the group.
-- **Follow output only** — controller never controls the group; it only follows output state.
-- Optional per-controller state inversion.
-- Optional per-controller state reflection.
+- Mirror ON/OFF
+- Toggle on every state edge
+- Momentary ON
+- Momentary OFF
+- Event
+- Follow output only
+- Per-controller inversion
+- Optional state reflection
 
-### Reliability / recovery
+### Rapid-input reliability
 
-- Startup protection window prevents false commands while integrations restore.
-- Offline/unknown transitions never count as physical button presses.
-- Controller recovery re-synchronizes to the desired group state.
-- Output recovery can either:
-  - adopt the physical output state, or
-  - enforce the previously desired state.
-- Event-driven control with a periodic watchdog as a safety net.
-- Persistent last desired state with debounced disk writes.
-- Automatic healing of missed controller updates.
+- Per-group FIFO edge queue.
+- Opposite rapid edges are **never** discarded by debounce.
+- Latest physical state wins.
+- Home Assistant Context-aware echo suppression.
+- Stale transactions cannot overwrite newer physical input.
+- Trailing source reconciliation for delayed cloud/device reports.
+- Source controller is not written back during its own transaction.
+- Output-offline handling retains only the newest requested state.
 
-### Home Assistant-native entities
+### Performance profiles
 
-Every group creates a virtual device with:
+- **Instant** — dispatch immediately, verify in the background.
+- **Balanced** — fast dispatch with output confirmation.
+- **Safe** — full output/follower confirmation.
 
-- `light.*` **or** `switch.*` — primary group control.
-- `switch.*_synchronization` — enable/disable group synchronization.
-- `sensor.*_health` — health state.
-- `binary_sensor.*_in_sync` — synchronization status.
-- `sensor.*_last_source` — last controller/output that initiated a change (disabled by default).
-- `sensor.*_last_latency` — last transaction latency in milliseconds (disabled by default).
-- `button.*_sync_now` — force reconciliation.
+### Advanced reliability
 
-### Management panel
+- Fallback output.
+- Authority policy: Latest Physical or Output Authority.
+- Startup protection.
+- Automatic healing/watchdog.
+- Adopt/enforce output recovery policy.
+- Retries and configurable confirmation timeouts.
+- Persistent desired state.
+- No unnecessary service calls when an entity already matches.
 
-A full-width admin panel is added to the Home Assistant sidebar:
+### Learn and Test Center
 
-- KPI summary: groups, healthy/degraded status and controller count.
-- Add/edit/delete/enable groups without YAML.
-- Entity picker plus optional area metadata for organizing groups.
-- Multiple controller modes per group.
-- Health overview.
-- Live activity / transaction history.
-- Non-destructive readiness test.
-- Global engine settings.
-- JSON backup/export and import/restore.
-- Arabic and English interface.
-- Native Home Assistant light/dark theme variables.
-- Responsive desktop/mobile layout.
+- Learn the physical output from a real wall press.
+- Learn each controller from a real wall press.
+- Ranked candidates and suggested controller mode.
+- Form draft never resets during live state updates.
+- End-to-end Toggle/Press testing uses the real synchronization path.
+- Rapid x4 stress test.
+- Live transaction timeline, command counts, failures, engine latency and end-to-end latency.
 
-### Diagnostics & Repairs
+## Smart Groups
 
-- Privacy-conscious Home Assistant diagnostics download.
-- Home Assistant **System Health** integration.
-- Repair issues for:
-  - missing physical output entities,
-  - missing controllers,
-  - repeatedly unresponsive physical outputs.
+Smart Groups are independent from the Multi-Way engine so large aggregate operations cannot block wall-switch synchronization.
 
-### Service actions
+### Physical Controller Group
+
+A real entity controls a set of members:
 
 ```text
-eshtaya_multiway.sync_group
-eshtaya_multiway.sync_all
-eshtaya_multiway.enable_group
-eshtaya_multiway.disable_group
-eshtaya_multiway.set_group_state
-eshtaya_multiway.test_group
+Physical controller: switch.floor_master
+├── light.hall
+├── switch.corridor
+└── light.stairs
 ```
 
-## Supported entities
+The controller can use mirror, toggle, momentary or event behavior. State can optionally be reflected back to a commandable controller.
 
-### Physical output
+### Virtual Group
 
-- `switch.*`
-- `light.*`
-- `input_boolean.*`
-- `fan.*`
+Creates a native Home Assistant `light` or `switch` that controls all members:
 
-### Controllers
+```text
+light.ground_floor_group
+├── light.hall
+├── light.living
+└── light.kitchen
+```
 
-- `switch.*`
-- `light.*`
-- `input_boolean.*`
-- `binary_sensor.*`
-- `button.*`
-- `input_button.*`
-- `event.*`
+### Smart Group policies
 
-State reflection is only available for commandable controller domains.
+- State policy: **Any ON** or **All ON**.
+- Direction: controller-only or bidirectional.
+- Instant / Balanced / Safe execution.
+- Member verification and retries.
+- Optional delay between members.
+- Continue-on-failure or stop-on-first-failure.
+- Physical-input priority window.
+- Scene batch guard/adoption.
+- Flapping detector.
+- Automatic or manual member quarantine/release.
+- Maintenance mode.
+- Per-group lock.
+- Favorites.
+- Per-member command, failure, latency and quality metrics.
+- Adaptive verification delay based on observed device response.
+- Repair issue generation and optional persistent notification on repeated faults.
 
+## Commissioning and project workflow
 
-## v2.1 performance and UX
+- Area-aware entity filtering.
+- Quick virtual group creation from an Area.
+- Auto-pair suggestions for Multi-Way commissioning.
+- Discover Home Assistant native group helpers.
+- **Import as Smart Group** without modifying the original Home Assistant group.
+- Smart Group templates.
+- Clone groups safely; physical clones intentionally require selecting a new controller.
+- Full non-destructive system test.
+- Downloadable commissioning/diagnostic report.
+- Project name and Installer Mode.
 
-- Draft-safe group editor: live runtime updates never reset an open form.
-- Isolated Test Center with per-device Toggle/Press controls and one-click re-sync.
-- Three response profiles: **Instant** (default), **Balanced**, and **Safe**.
-- Instant mode dispatches the output and followers without blocking, then verifies the physical output in the background with stale-transaction protection and rollback.
-- Cleaner group cards show the active response profile.
+## Safety and recovery
+
+- Missing entity detection across Multi-Way and Smart Groups.
+- Replacement/remap wizard from the Control Center.
+- Automatic configuration snapshots before destructive changes.
+- Undo for each engine.
+- Full platform backup/restore with rollback on failed import.
+- Configuration Lock protects add/edit/delete/remap/import while runtime control remains available.
+- Versioned storage schemas reject future unsupported data instead of silently rewriting it.
+- Home Assistant Repairs, Diagnostics and System Health support.
+
+## Native entities
+
+### Multi-Way group
+
+- Virtual `light` or `switch` control.
+- Synchronization enable switch.
+- Health sensor.
+- In-sync binary sensor.
+- Last source sensor (disabled by default).
+- Latency sensor (disabled by default).
+- Sync button.
+
+### Smart Group
+
+Virtual Smart Groups expose a control `light`/`switch`. All Smart Groups expose:
+
+- Enabled switch.
+- Health sensor.
+- Quality sensor.
+- Healthy binary sensor.
+- Last source sensor (disabled by default).
+- Latency sensor (disabled by default).
+- Sync button.
 
 ## Installation with HACS
 
-1. Open **HACS**.
-2. Open **Integrations**.
-3. Add this repository as a **Custom repository** using category **Integration**.
+1. Open **HACS → Integrations → Custom repositories**.
+2. Add:
+   `https://github.com/badereshtaya/hacs-eshtaya-multiway-control`
+3. Category: **Integration**.
 4. Download **Eshtaya Multi-Way Control**.
 5. Restart Home Assistant.
-6. Go to **Settings → Devices & services → Add integration**.
-7. Search for **Eshtaya Multi-Way Control** and add it.
-8. Open **Multi-Way Control** from the sidebar.
+6. Open **Settings → Devices & services → Add Integration**.
+7. Add **Eshtaya Multi-Way Control**.
+8. Open **Eshtaya Control Center** from the sidebar.
 
-## Manual installation
+## Updating
 
-Copy:
+Releases are versioned with Git tags such as `v3.0.0`. HACS discovers the published GitHub Release and offers it as an update.
 
-```text
-custom_components/eshtaya_multiway/
-```
+## Repository validation
 
-to:
+GitHub Actions run:
 
-```text
-/config/custom_components/eshtaya_multiway/
-```
+- HACS validation
+- Hassfest
+- Ruff
+- Pytest against a pinned Home Assistant test environment
+- Release tag/version validation
 
-Restart Home Assistant and add the integration from **Settings → Devices & services**.
+## Privacy
 
-## Recommended wiring
-
-The physical output should be the relay that really powers the lamp/load. Secondary wall switches should preferably have no connected load or use a vendor-provided detached/decoupled mode when available.
-
-The integration is a software control layer; it is not a substitute for electrical protection or code-compliant wiring.
-
-## Architecture & testing
-
-- [Architecture](docs/ARCHITECTURE.md)
-- [Field test matrix](docs/TESTING.md)
-
-## Development / validation
-
-The repository contains GitHub Actions for:
-
-- HACS repository validation.
-- Home Assistant Hassfest validation.
-- Ruff correctness/lint checks.
-- Automated tag-to-release packaging.
-- Pytest tests using `pytest-homeassistant-custom-component`.
-
-## Arabic summary
-
-**Eshtaya Multi-Way Control** بخليك تعمل فكسل برمجي احترافي داخل Home Assistant بدون أوتوميشن لكل زر. بتحدد خرج رئيسي موصول فعلياً بالإنارة، وبتضيف أي عدد من الأزرار الفرعية، والتكامل يدير المزامنة، منع الـ loops، رجوع الأجهزة من Offline، فحص الصحة، والـ Virtual Entity من مكان واحد.
+The integration requires no external credentials and performs no direct external network calls. Diagnostics intentionally omit configured source entity IDs from recent activity where practical; always review diagnostics before sharing them publicly.
 
 ## License
 
-MIT License. See [LICENSE](LICENSE).
+MIT.

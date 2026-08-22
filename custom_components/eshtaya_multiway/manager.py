@@ -10,7 +10,8 @@ from typing import Any
 from uuid import uuid4
 
 from homeassistant.const import ATTR_ENTITY_ID
-from homeassistant.core import Event, HomeAssistant, State, callback
+from homeassistant.core import Context, Event, HomeAssistant, State, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import (
@@ -76,6 +77,10 @@ class MultiWayManager:
         self._started = False
         self._ready = False
         self._verification_tasks: set[asyncio.Task] = set()
+        self._event_queues: dict[str, asyncio.Queue[tuple[Event, float]]] = {}
+        self._event_workers: dict[str, asyncio.Task] = {}
+        self._source_reconcile_tasks: dict[str, asyncio.Task] = {}
+        self._learn_sessions: dict[str, dict[str, Any]] = {}
 
     async def async_start(self) -> None:
         """Start listeners and delayed startup reconciliation."""
@@ -100,15 +105,23 @@ class MultiWayManager:
         """Stop all listeners and flush state."""
         self._started = False
         self._ready = False
-        self._verification_tasks: set[asyncio.Task] = set()
         for unsub in (self._state_unsub, self._watchdog_unsub, self._startup_unsub):
             if unsub:
                 unsub()
         self._state_unsub = None
         self._watchdog_unsub = None
         self._startup_unsub = None
-        tasks = list(self._verification_tasks)
+        for session_id in list(self._learn_sessions):
+            self.cancel_learn(session_id)
+        tasks = [
+            *self._verification_tasks,
+            *self._event_workers.values(),
+            *self._source_reconcile_tasks.values(),
+        ]
         self._verification_tasks.clear()
+        self._event_workers.clear()
+        self._source_reconcile_tasks.clear()
+        self._event_queues.clear()
         for task in tasks:
             task.cancel()
         if tasks:
@@ -163,6 +176,9 @@ class MultiWayManager:
         self._entity_to_group.clear()
         for group in groups:
             self._entity_to_group[group["output"]] = group["id"]
+            fallback = group.get("behavior", {}).get("fallback_output")
+            if fallback:
+                self._entity_to_group[fallback] = group["id"]
             for controller in group["controllers"]:
                 self._entity_to_group[controller["entity_id"]] = group["id"]
             self._runtime.setdefault(group["id"], GroupRuntime())
@@ -177,6 +193,19 @@ class MultiWayManager:
         self._locks = {
             group_id: lock for group_id, lock in self._locks.items() if group_id in valid_ids
         }
+        # Keep one FIFO edge queue per group. This guarantees that rapid ON -> OFF
+        # transitions are handled in arrival order instead of racing independent tasks.
+        for group_id in valid_ids:
+            self._event_queues.setdefault(group_id, asyncio.Queue())
+        for group_id in list(self._event_queues):
+            if group_id not in valid_ids:
+                self._event_queues.pop(group_id, None)
+                worker = self._event_workers.pop(group_id, None)
+                if worker:
+                    worker.cancel()
+                reconcile = self._source_reconcile_tasks.pop(group_id, None)
+                if reconcile:
+                    reconcile.cancel()
 
         settings = self.store.settings()
         old_activity = list(self._activity)[-int(settings["history_size"]) :]
@@ -190,6 +219,19 @@ class MultiWayManager:
             for group_id in self._groups:
                 await self.async_sync_group(group_id)
         self._notify_all()
+
+    def _active_output(self, group: dict[str, Any]) -> str:
+        """Return primary output, or configured fallback when primary is unavailable."""
+        primary = group["output"]
+        state = self.hass.states.get(primary)
+        if state is not None and state.state not in UNAVAILABLE_STATES:
+            return primary
+        fallback = group.get("behavior", {}).get("fallback_output")
+        if fallback:
+            fallback_state = self.hass.states.get(fallback)
+            if fallback_state is not None and fallback_state.state not in UNAVAILABLE_STATES:
+                return fallback
+        return primary
 
     def _resubscribe_states(self) -> None:
         if self._state_unsub:
@@ -216,9 +258,42 @@ class MultiWayManager:
 
     @callback
     def _async_state_event(self, event: Event) -> None:
-        self.hass.async_create_task(self._async_handle_state_event(event))
+        """Queue physical edges in exact arrival order for their group."""
+        entity_id = event.data.get("entity_id")
+        group_id = self._entity_to_group.get(entity_id)
+        if not group_id or group_id not in self._groups:
+            return
+        queue = self._event_queues.setdefault(group_id, asyncio.Queue())
+        queue.put_nowait((event, monotonic()))
+        worker = self._event_workers.get(group_id)
+        if worker is None or worker.done():
+            worker = self.hass.async_create_task(self._async_drain_group_events(group_id))
+            self._event_workers[group_id] = worker
 
-    async def _async_handle_state_event(self, event: Event) -> None:
+    async def _async_drain_group_events(self, group_id: str) -> None:
+        """Drain one group's edge queue serially; never reorder rapid presses."""
+        queue = self._event_queues.get(group_id)
+        if queue is None:
+            return
+        try:
+            while True:
+                try:
+                    event, received_at = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                try:
+                    await self._async_handle_state_event(event, received_at)
+                finally:
+                    queue.task_done()
+        finally:
+            current = self._event_workers.get(group_id)
+            if current is asyncio.current_task():
+                self._event_workers.pop(group_id, None)
+            if queue and not queue.empty() and group_id in self._groups:
+                worker = self.hass.async_create_task(self._async_drain_group_events(group_id))
+                self._event_workers[group_id] = worker
+
+    async def _async_handle_state_event(self, event: Event, received_at: float) -> None:
         if not self._ready:
             return
         entity_id: str = event.data["entity_id"]
@@ -238,20 +313,29 @@ class MultiWayManager:
 
         runtime = self._runtime[group_id]
         self._cleanup_pending(runtime)
+        event_context_id = event.context.id if event.context else None
+        own_command = runtime.command_contexts.pop(event_context_id, None) if event_context_id else None
+        if own_command:
+            pending = runtime.pending.get(entity_id)
+            if pending and pending.context_id == event_context_id:
+                runtime.pending.pop(entity_id, None)
+            # Context proves this state change came from our own service call. Ignore
+            # even stale echoes from older transactions so they can never become input.
+            self._update_health(group_id)
+            self._notify(group_id)
+            return
         pending = runtime.pending.get(entity_id)
-        if pending and new.state == pending.expected_state:
-            runtime.pending.pop(entity_id, None)
-            self._update_health(group_id)
-            self._notify(group_id)
-            return
-        if pending and new.state != pending.expected_state:
-            runtime.pending.pop(entity_id, None)
-
-        self._cleanup_suppressed(runtime)
-        if runtime.suppressed_until.get(entity_id, 0.0) > monotonic():
-            self._update_health(group_id)
-            self._notify(group_id)
-            return
+        if pending:
+            if new.state == pending.expected_state and pending.transaction_id == runtime.last_transaction_id:
+                # Fallback for integrations that do not propagate HA Context.
+                runtime.pending.pop(entity_id, None)
+                self._update_health(group_id)
+                self._notify(group_id)
+                return
+            if new.state != pending.expected_state:
+                # Opposite edge always wins, even inside the suppression/debounce window.
+                runtime.pending.pop(entity_id, None)
+                runtime.rapid_edges_seen += 1
 
         old_state = old.state if old else None
         new_state = new.state
@@ -260,11 +344,8 @@ class MultiWayManager:
 
         if new_state in UNAVAILABLE_STATES:
             self._add_activity(
-                group_id=group_id,
-                source=entity_id,
-                event="entity_offline",
-                result="warning",
-                message=f"{entity_id} became {new_state}",
+                group_id=group_id, source=entity_id, event="entity_offline",
+                result="warning", message=f"{entity_id} became {new_state}",
             )
             self._update_health(group_id)
             self._refresh_repairs_for_group(group_id)
@@ -276,17 +357,55 @@ class MultiWayManager:
             await self._async_handle_recovery(group, entity_id, new_state)
             return
 
-        if entity_id == group["output"]:
+        runtime.input_sequence += 1
+        input_sequence = runtime.input_sequence
+        engine_delay_ms = int((monotonic() - received_at) * 1000)
+        runtime.last_engine_latency_ms = engine_delay_ms
+
+        if entity_id in {group["output"], group.get("behavior", {}).get("fallback_output")} :
             if new_state not in VALID_STATES:
                 return
+            if (
+                group.get("behavior", {}).get("source_policy", "latest_physical") == "latest_physical"
+                and runtime.authority_source
+                and runtime.authority_state in VALID_STATES
+                and monotonic() < runtime.authority_until
+            ):
+                if new_state == runtime.authority_state:
+                    self._add_activity(
+                        group_id=group_id, source=entity_id, event="authority_confirmed",
+                        action=new_state, result="success",
+                        message=f"Output confirmed latest source {runtime.authority_source}",
+                    )
+                    self._update_health(group_id)
+                    self._notify(group_id)
+                    return
+                # A mismatching Main edge inside the source-authority window is
+                # treated as a stale command echo. Reassert only the newest source
+                # state; never adopt the older edge as group truth.
+                self._add_activity(
+                    group_id=group_id, source=entity_id, event="stale_output_edge",
+                    action=new_state, result="warning",
+                    message=f"Ignored during authority lease of {runtime.authority_source}",
+                )
+                runtime.input_sequence += 1
+                self.hass.async_create_task(
+                    self.async_request_state(
+                        group_id, runtime.authority_state, source=runtime.authority_source,
+                        origin="physical_controller", input_sequence=runtime.input_sequence,
+                        engine_delay_ms=engine_delay_ms,
+                    )
+                )
+                return
+            runtime.authority_source = None
+            runtime.authority_state = None
+            runtime.authority_until = 0.0
             async with self._locks[group_id]:
                 await self._async_accept_output_change(group, new_state, entity_id)
             return
 
         controller = self._controller(group, entity_id)
         if controller is None:
-            return
-        if self._debounced(group, runtime, entity_id):
             return
 
         mode = controller["mode"]
@@ -303,16 +422,30 @@ class MultiWayManager:
         elif mode == MODE_EVENT and old_state != new_state:
             target = self._toggle_target(group_id)
         elif mode == MODE_FOLLOW:
-            # Follow-only controllers are display/relay followers and never authoritative.
             return
 
-        if target in VALID_STATES:
-            await self.async_request_state(
-                group_id,
-                target,
-                source=entity_id,
-                origin="physical_controller",
-            )
+        if target not in VALID_STATES:
+            return
+        if self._debounced(group, runtime, entity_id, target):
+            return
+
+        # A different physical controller always becomes immediately eligible as
+        # input. A short authority lease is only created by rapid opposite edges
+        # from the same source (inside _debounced), where cloud echo reordering is
+        # the actual risk we need to protect against.
+        if runtime.authority_source and runtime.authority_source != entity_id:
+            runtime.authority_source = None
+            runtime.authority_state = None
+            runtime.authority_until = 0.0
+
+        await self.async_request_state(
+            group_id,
+            target,
+            source=entity_id,
+            origin="physical_controller",
+            input_sequence=input_sequence,
+            engine_delay_ms=engine_delay_ms,
+        )
 
     async def _async_handle_recovery(
         self, group: dict[str, Any], entity_id: str, new_state: str
@@ -323,20 +456,25 @@ class MultiWayManager:
         self._notify(group_id)
 
         if entity_id == group["output"] and new_state in VALID_STATES:
-            policy = group["behavior"].get("output_restore_policy", "adopt")
-            if policy == "adopt" or runtime.desired_state not in VALID_STATES:
-                runtime.desired_state = new_state
-                self.store.set_last_state(group_id, new_state)
-                await self._async_sync_controllers(
-                    group, new_state, transaction_id="recovery", wait=False
+            if runtime.pending_offline_state in VALID_STATES:
+                pending_state = runtime.pending_offline_state
+                applied = await self.async_request_state(
+                    group_id, pending_state, source=entity_id, origin="output_recovery"
                 )
+                if applied:
+                    runtime.pending_offline_state = None
             else:
-                await self.async_request_state(
-                    group_id,
-                    runtime.desired_state,
-                    source=entity_id,
-                    origin="output_recovery",
-                )
+                policy = group["behavior"].get("output_restore_policy", "adopt")
+                if policy == "adopt" or runtime.desired_state not in VALID_STATES:
+                    runtime.desired_state = new_state
+                    self.store.set_last_state(group_id, new_state)
+                    await self._async_sync_controllers(
+                        group, new_state, transaction_id="recovery", wait=False
+                    )
+                else:
+                    await self.async_request_state(
+                        group_id, runtime.desired_state, source=entity_id, origin="output_recovery"
+                    )
         elif runtime.desired_state in VALID_STATES:
             controller = self._controller(group, entity_id)
             if controller and controller.get("reflect_state"):
@@ -402,6 +540,8 @@ class MultiWayManager:
         *,
         source: str = "virtual",
         origin: str = "service",
+        input_sequence: int | None = None,
+        engine_delay_ms: int | None = None,
     ) -> bool:
         """Request a state transaction using the configured performance profile."""
         if state not in VALID_STATES:
@@ -414,6 +554,9 @@ class MultiWayManager:
 
         async with self._locks[group_id]:
             runtime = self._runtime[group_id]
+            if input_sequence is not None and input_sequence < runtime.input_sequence:
+                runtime.stale_transactions_discarded += 1
+                return True
             txid = self._txid()
             started = monotonic()
             performance = self._performance_mode(group)
@@ -424,6 +567,8 @@ class MultiWayManager:
             runtime.last_action = state
             runtime.last_changed = _utcnow()
             runtime.last_error = None
+            if engine_delay_ms is not None:
+                runtime.last_engine_latency_ms = engine_delay_ms
 
             # Instant mode is optimistic by design: publish the desired state and
             # dispatch the physical output immediately. A version-aware background
@@ -451,6 +596,7 @@ class MultiWayManager:
                     transaction_id=txid,
                     wait=False,
                     blocking=False,
+                    skip_entity_id=source if origin in {"physical_controller", "test_center"} else None,
                 )
                 runtime.last_latency_ms = int((monotonic() - started) * 1000)
                 self._add_activity(
@@ -470,6 +616,8 @@ class MultiWayManager:
                 self._notify(group_id)
                 if confirm:
                     self._schedule_fast_verification(group_id, state, txid, source, origin)
+                if origin in {"physical_controller", "test_center"}:
+                    self._schedule_source_reconcile(group_id, source, state, txid)
                 return all(controller_results)
 
             # Balanced: dispatch output without blocking the service handler, but
@@ -499,6 +647,7 @@ class MultiWayManager:
                 transaction_id=txid,
                 wait=safe,
                 blocking=safe,
+                skip_entity_id=source if origin in {"physical_controller", "test_center"} else None,
             )
             runtime.last_latency_ms = int((monotonic() - started) * 1000)
             success = all(controller_results)
@@ -518,6 +667,8 @@ class MultiWayManager:
             self._update_health(group_id)
             self._refresh_repairs_for_group(group_id)
             self._notify(group_id)
+            if origin in {"physical_controller", "test_center"}:
+                self._schedule_source_reconcile(group_id, source, state, txid)
             return success
 
     def _record_immediate_output_failure(
@@ -532,11 +683,18 @@ class MultiWayManager:
     ) -> bool:
         group_id = group["id"]
         runtime.consecutive_output_failures += 1
-        runtime.last_error = f"Output {group['output']} could not accept {state}"
-        output_state = self.hass.states.get(group["output"])
+        active_output = self._active_output(group)
+        runtime.last_error = f"Output {active_output} could not accept {state}"
+        output_state = self.hass.states.get(active_output)
         if output_state and output_state.state in VALID_STATES:
             runtime.desired_state = output_state.state
             self.store.set_last_state(group_id, output_state.state)
+        elif origin in {"physical_controller", "test_center"}:
+            # Preserve only the newest requested physical state while the Main is offline.
+            # Recovery will apply this one state, never replay a queue of stale commands.
+            runtime.desired_state = state
+            runtime.pending_offline_state = state
+            self.store.set_last_state(group_id, state)
         runtime.last_latency_ms = int((monotonic() - started) * 1000)
         self._add_activity(
             group_id=group_id,
@@ -571,12 +729,13 @@ class MultiWayManager:
         if not group or not runtime:
             return
         timeout = self._group_timeout(group)
-        confirmed = await self._async_wait_for_state(group["output"], state, timeout)
+        active_output = self._active_output(group)
+        confirmed = await self._async_wait_for_state(active_output, state, timeout)
         if runtime.last_transaction_id != txid or runtime.desired_state != state:
             return
         if not confirmed:
             confirmed = await self._async_command_entity(
-                group["output"],
+                active_output,
                 state,
                 transaction_id=txid,
                 wait=True,
@@ -601,8 +760,8 @@ class MultiWayManager:
             )
         else:
             runtime.consecutive_output_failures += 1
-            runtime.last_error = f"Output {group['output']} did not confirm {state}"
-            actual = self.hass.states.get(group["output"])
+            runtime.last_error = f"Output {active_output} did not confirm {state}"
+            actual = self.hass.states.get(active_output)
             if actual and actual.state in VALID_STATES:
                 runtime.desired_state = actual.state
                 self.store.set_last_state(group_id, actual.state)
@@ -636,13 +795,18 @@ class MultiWayManager:
         wait_override: bool | None = None,
         blocking: bool = False,
     ) -> bool:
-        output = group["output"]
+        output = self._active_output(group)
         current = self.hass.states.get(output)
         if current and current.state == state:
             return True
         if current is None or current.state in UNAVAILABLE_STATES:
             return False
 
+        if output != group["output"]:
+            self._add_activity(
+                group_id=group["id"], source=output, event="fallback_output_used",
+                action=state, result="warning", message=f"Primary output {group['output']} unavailable",
+            )
         confirm = self._confirm_output(group) if wait_override is None else wait_override
         return await self._async_command_entity(
             output,
@@ -662,9 +826,12 @@ class MultiWayManager:
         transaction_id: str,
         wait: bool,
         blocking: bool = False,
+        skip_entity_id: str | None = None,
     ) -> list[bool]:
         tasks = []
         for controller in group["controllers"]:
+            if controller["entity_id"] == skip_entity_id:
+                continue
             if not controller.get("reflect_state"):
                 continue
             tasks.append(
@@ -727,23 +894,40 @@ class MultiWayManager:
 
         group_id = self._entity_to_group.get(entity_id)
         runtime = self._runtime.get(group_id) if group_id else None
+        command_started = monotonic()
+        if runtime:
+            metric = runtime.entity_metrics.setdefault(
+                entity_id, {"commands": 0, "failures": 0, "last_latency_ms": None, "last_action": None, "last_result": None, "last_timestamp": None}
+            )
+            metric["commands"] += 1
+            metric["last_action"] = state
         for attempt in range(retries + 1):
+            command_context = Context()
             if runtime:
-                runtime.pending[entity_id] = PendingCommand(
+                command = PendingCommand(
                     expected_state=state,
                     transaction_id=transaction_id,
                     expires=monotonic() + timeout + 2,
+                    context_id=command_context.id,
+                    source_entity=runtime.last_source,
                 )
+                runtime.pending[entity_id] = command
+                runtime.command_contexts[command_context.id] = command
             try:
                 await self.hass.services.async_call(
                     domain,
                     service,
                     {ATTR_ENTITY_ID: entity_id},
                     blocking=blocking,
+                    context=command_context,
                 )
                 if not wait:
+                    if runtime:
+                        self._record_entity_metric(runtime, entity_id, True, command_started)
                     return True
                 if await self._async_wait_for_state(entity_id, state, timeout):
+                    if runtime:
+                        self._record_entity_metric(runtime, entity_id, True, command_started)
                     return True
             except Exception as err:  # noqa: BLE001 - isolate third-party entity failures
                 _LOGGER.warning(
@@ -760,6 +944,7 @@ class MultiWayManager:
 
         if runtime:
             runtime.pending.pop(entity_id, None)
+            self._record_entity_metric(runtime, entity_id, False, command_started)
         return False
 
     async def _async_wait_for_state(
@@ -796,7 +981,8 @@ class MultiWayManager:
             raise ValueError("Group not found")
         if not group.get("enabled", True):
             return False
-        output = self.hass.states.get(group["output"])
+        active_output = self._active_output(group)
+        output = self.hass.states.get(active_output)
         if output and output.state in VALID_STATES:
             state = output.state
             runtime = self._runtime[group_id]
@@ -837,15 +1023,19 @@ class MultiWayManager:
         return group
 
     def test_group(self, group_id: str) -> dict[str, Any]:
-        """Run a non-destructive readiness test for a group."""
+        """Run a non-destructive readiness snapshot for a group."""
         group = self._groups.get(group_id)
         if not group:
             raise ValueError("Group not found")
+        status = self.status(group_id)
+        metrics = status.get("entity_metrics", {})
         entities = []
-        for role, entity_id in [
-            ("output", group["output"]),
-            *[("controller", c["entity_id"]) for c in group["controllers"]],
-        ]:
+        test_members = [("output", group["output"])]
+        fallback = group.get("behavior", {}).get("fallback_output")
+        if fallback:
+            test_members.append(("fallback_output", fallback))
+        test_members.extend(("controller", c["entity_id"]) for c in group["controllers"])
+        for role, entity_id in test_members:
             state = self.hass.states.get(entity_id)
             domain = entity_id.split(".", 1)[0]
             action = None
@@ -855,26 +1045,22 @@ class MultiWayManager:
                 action = "press"
             entities.append(
                 {
-                    "entity_id": entity_id,
-                    "role": role,
-                    "domain": domain,
-                    "exists": state is not None,
-                    "state": state.state if state else "missing",
-                    "commandable": action is not None,
-                    "test_action": action,
+                    "entity_id": entity_id, "role": role, "domain": domain,
+                    "exists": state is not None, "state": state.state if state else "missing",
+                    "commandable": action is not None, "test_action": action,
+                    "metrics": metrics.get(entity_id, {}),
                 }
             )
+        recent = [item for item in self.activity(100) if item.get("group_id") == group_id][:10]
         return {
-            "group_id": group_id,
-            "name": group["name"],
-            "health": self.status(group_id)["health"],
-            "entities": entities,
+            "group_id": group_id, "name": group["name"], "health": status["health"],
+            "runtime": status, "entities": entities, "activity": recent,
         }
 
     async def async_test_entity_action(
         self, group_id: str, entity_id: str
     ) -> dict[str, Any]:
-        """Exercise one group member without letting the test propagate through the group."""
+        """Exercise one member through the real multi-way path (end-to-end test)."""
         group = self._groups.get(group_id)
         if not group:
             raise ValueError("Group not found")
@@ -887,12 +1073,12 @@ class MultiWayManager:
 
         domain = entity_id.split(".", 1)[0]
         runtime = self._runtime[group_id]
-        timeout = min(self._group_timeout(group), 4.0)
-        runtime.suppressed_until[entity_id] = monotonic() + timeout + 3.0
-        runtime.test_mode_until = max(runtime.test_mode_until, monotonic() + 30.0)
+        timeout = min(max(self._group_timeout(group), 1.0), 6.0)
         started = monotonic()
-        txid = f"test_{self._txid()}"
+        txid = f"e2e_test_{self._txid()}"
+        before_group = runtime.desired_state
         target: str | None = None
+        expected_group: str | None = None
         action: str
 
         if domain in COMMANDABLE_DOMAINS:
@@ -900,48 +1086,103 @@ class MultiWayManager:
                 raise ValueError("Entity does not expose an ON/OFF state")
             target = _invert_state(current.state)
             action = "toggle"
-            ok = await self._async_command_entity(
-                entity_id,
-                target,
-                transaction_id=txid,
-                wait=True,
-                timeout=timeout,
-                retries=0,
-                blocking=False,
+            if entity_id == group["output"]:
+                expected_group = target
+            else:
+                controller = self._controller(group, entity_id)
+                if controller and controller["mode"] == MODE_MIRROR:
+                    expected_group = self._controller_to_group_state(controller, target)
+                elif controller and controller["mode"] != MODE_FOLLOW:
+                    expected_group = _invert_state(
+                        before_group if before_group in VALID_STATES else "off"
+                    )
+            service = "turn_on" if target == "on" else "turn_off"
+            await self.hass.services.async_call(
+                domain, service, {ATTR_ENTITY_ID: entity_id}, blocking=False, context=Context()
             )
+            source_ok = await self._async_wait_for_state(entity_id, target, timeout)
         elif domain in PRESSABLE_DOMAINS:
             action = "press"
+            if before_group in VALID_STATES:
+                expected_group = _invert_state(before_group)
             await self.hass.services.async_call(
-                domain,
-                "press",
-                {ATTR_ENTITY_ID: entity_id},
-                blocking=False,
+                domain, "press", {ATTR_ENTITY_ID: entity_id}, blocking=False, context=Context()
             )
-            ok = True
+            source_ok = True
         else:
             raise ValueError("This entity is read-only and cannot be exercised")
 
+        output_ok = True
+        if expected_group in VALID_STATES:
+            output_ok = await self._async_wait_for_state(self._active_output(group), expected_group, timeout)
+        await asyncio.sleep(0.05)
         latency_ms = int((monotonic() - started) * 1000)
+        ok = bool(source_ok and output_ok)
         self._add_activity(
-            group_id=group_id,
-            transaction_id=txid,
-            source=entity_id,
-            event="isolated_test",
-            action=target or action,
-            result="success" if ok else "failed",
-            latency_ms=latency_ms,
+            group_id=group_id, transaction_id=txid, source=entity_id,
+            event="end_to_end_test", action=target or action,
+            result="success" if ok else "failed", latency_ms=latency_ms,
             origin="test_center",
-            message="Isolated device test; group propagation suppressed",
+            message="Real group test: source action propagated through normal multi-way logic",
         )
         self._update_health(group_id)
         self._notify(group_id)
         return {
-            "ok": ok,
-            "entity_id": entity_id,
-            "action": action,
-            "target": target,
-            "latency_ms": latency_ms,
+            "ok": ok, "entity_id": entity_id, "action": action, "target": target,
+            "expected_group_state": expected_group, "latency_ms": latency_ms,
+            "engine_latency_ms": runtime.last_engine_latency_ms,
             "group": self.test_group(group_id),
+        }
+
+    async def async_rapid_toggle_test(
+        self, group_id: str, entity_id: str, count: int = 4, interval_ms: int = 120
+    ) -> dict[str, Any]:
+        """Rapidly toggle one real member and verify final group state."""
+        group = self._groups.get(group_id)
+        if not group:
+            raise ValueError("Group not found")
+        members = {group["output"], *(c["entity_id"] for c in group["controllers"])}
+        if entity_id not in members:
+            raise ValueError("Entity does not belong to this group")
+        state = self.hass.states.get(entity_id)
+        domain = entity_id.split(".", 1)[0]
+        if not state or state.state not in VALID_STATES or domain not in COMMANDABLE_DOMAINS:
+            raise ValueError("Rapid test requires a commandable ON/OFF entity")
+        count = max(2, min(int(count), 10))
+        interval = max(50, min(int(interval_ms), 1000)) / 1000
+        started = monotonic()
+        target = state.state
+        for _ in range(count):
+            target = _invert_state(target)
+            await self.hass.services.async_call(
+                domain, "turn_on" if target == "on" else "turn_off",
+                {ATTR_ENTITY_ID: entity_id}, blocking=False, context=Context()
+            )
+            await asyncio.sleep(interval)
+        source_ok = await self._async_wait_for_state(entity_id, target, min(self._group_timeout(group), 6.0))
+        controller = self._controller(group, entity_id)
+        if entity_id == group["output"]:
+            expected_group = target
+        elif controller and controller["mode"] == MODE_MIRROR:
+            expected_group = self._controller_to_group_state(controller, target)
+        else:
+            expected_group = self._runtime[group_id].desired_state
+        output_ok = expected_group in VALID_STATES and await self._async_wait_for_state(
+            self._active_output(group), expected_group, min(self._group_timeout(group), 6.0)
+        )
+        latency_ms = int((monotonic() - started) * 1000)
+        ok = bool(source_ok and output_ok)
+        self._add_activity(
+            group_id=group_id, source=entity_id, event="rapid_toggle_test",
+            action=target, result="success" if ok else "failed", latency_ms=latency_ms,
+            origin="test_center", message=f"{count} edges at {int(interval*1000)} ms interval",
+        )
+        return {
+            "ok": ok, "entity_id": entity_id, "count": count,
+            "interval_ms": int(interval * 1000), "final_source_state": target,
+            "expected_group_state": expected_group,
+            "actual_output_state": self.hass.states.get(self._active_output(group)).state if self.hass.states.get(self._active_output(group)) else "missing",
+            "latency_ms": latency_ms, "group": self.test_group(group_id),
         }
 
     @callback
@@ -958,17 +1199,17 @@ class MultiWayManager:
             runtime = self._runtime[group_id]
             self._cleanup_pending(runtime)
             self._cleanup_suppressed(runtime)
-            if runtime.test_mode_until > monotonic():
-                continue
-            runtime.test_mode_until = 0.0
             self._update_health(group_id)
             if not group["behavior"].get("auto_heal", True):
                 continue
             if runtime.desired_state not in VALID_STATES:
                 continue
-            output = self.hass.states.get(group["output"])
-            if output and output.state in VALID_STATES and output.state != runtime.desired_state:
-                # Physical output is authoritative unless this is a known pending command.
+            active_output = self._active_output(group)
+            output = self.hass.states.get(active_output)
+            if (
+                group.get("behavior", {}).get("source_policy", "latest_physical") == "output_authority"
+                and output and output.state in VALID_STATES and output.state != runtime.desired_state
+            ):
                 runtime.desired_state = output.state
                 self.store.set_last_state(group_id, output.state)
             if output and output.state in VALID_STATES:
@@ -996,8 +1237,17 @@ class MultiWayManager:
                 "entity_id": group["output"],
                 "role": "output",
                 "state": output_state.state if output_state else "missing",
+                "metrics": runtime.entity_metrics.get(group["output"], {}),
             }
         )
+        fallback = group.get("behavior", {}).get("fallback_output")
+        if fallback:
+            fallback_state = self.hass.states.get(fallback)
+            members.append({
+                "entity_id": fallback, "role": "fallback_output",
+                "state": fallback_state.state if fallback_state else "missing",
+                "metrics": runtime.entity_metrics.get(fallback, {}),
+            })
         for controller in group["controllers"]:
             state = self.hass.states.get(controller["entity_id"])
             members.append(
@@ -1008,6 +1258,7 @@ class MultiWayManager:
                     "reflect_state": controller["reflect_state"],
                     "invert": controller["invert"],
                     "state": state.state if state else "missing",
+                    "metrics": runtime.entity_metrics.get(controller["entity_id"], {}),
                 }
             )
         return {**runtime.as_dict(), "members": members}
@@ -1048,10 +1299,14 @@ class MultiWayManager:
             return
 
         output = self.hass.states.get(group["output"])
-        if output is None:
+        fallback_id = group.get("behavior", {}).get("fallback_output")
+        fallback = self.hass.states.get(fallback_id) if fallback_id else None
+        primary_ok = output is not None and output.state not in UNAVAILABLE_STATES
+        fallback_ok = fallback is not None and fallback.state not in UNAVAILABLE_STATES
+        if output is None and not fallback_ok:
             runtime.health = HEALTH_MISSING_OUTPUT
             return
-        if output.state in UNAVAILABLE_STATES:
+        if not primary_ok and not fallback_ok:
             runtime.health = HEALTH_OUTPUT_OFFLINE
             return
 
@@ -1176,7 +1431,7 @@ class MultiWayManager:
         current = self._runtime[group_id].desired_state
         if current not in VALID_STATES:
             group = self._groups[group_id]
-            output = self.hass.states.get(group["output"])
+            output = self.hass.states.get(self._active_output(group))
             current = output.state if output and output.state in VALID_STATES else "off"
         return _invert_state(current)
 
@@ -1206,6 +1461,9 @@ class MultiWayManager:
         expired = [entity_id for entity_id, cmd in runtime.pending.items() if cmd.expired]
         for entity_id in expired:
             runtime.pending.pop(entity_id, None)
+        expired_contexts = [context_id for context_id, cmd in runtime.command_contexts.items() if cmd.expired]
+        for context_id in expired_contexts:
+            runtime.command_contexts.pop(context_id, None)
 
     @staticmethod
     def _cleanup_suppressed(runtime: GroupRuntime) -> None:
@@ -1244,12 +1502,194 @@ class MultiWayManager:
         return max(0, min(int(value), 5))
 
     @staticmethod
-    def _debounced(group: dict[str, Any], runtime: GroupRuntime, entity_id: str) -> bool:
+    def _debounced(
+        group: dict[str, Any], runtime: GroupRuntime, entity_id: str, semantic_state: str
+    ) -> bool:
+        """Suppress only duplicate semantic edges; opposite edges are never dropped."""
         debounce = max(0, int(group["behavior"].get("debounce_ms", 120))) / 1000
         now = monotonic()
-        previous = runtime.last_input_time.get(entity_id, 0.0)
+        previous_time = runtime.last_input_time.get(entity_id, 0.0)
+        previous_state = runtime.last_input_state.get(entity_id)
         runtime.last_input_time[entity_id] = now
-        return debounce > 0 and now - previous < debounce
+        runtime.last_input_state[entity_id] = semantic_state
+        if previous_state != semantic_state:
+            authority_window = max(0, min(int(group["behavior"].get("authority_window_ms", 1800)), 10000)) / 1000
+            if (
+                group["behavior"].get("source_policy", "latest_physical") == "latest_physical"
+                and previous_time and authority_window > 0 and now - previous_time < authority_window
+            ):
+                runtime.rapid_edges_seen += 1
+                runtime.authority_source = entity_id
+                runtime.authority_state = semantic_state
+                runtime.authority_until = now + authority_window
+            return False
+        return debounce > 0 and now - previous_time < debounce
+
+    @staticmethod
+    def _record_entity_metric(
+        runtime: GroupRuntime, entity_id: str, success: bool, started: float
+    ) -> None:
+        metric = runtime.entity_metrics.setdefault(
+            entity_id, {"commands": 0, "failures": 0, "last_latency_ms": None, "last_action": None, "last_result": None, "last_timestamp": None}
+        )
+        if not success:
+            metric["failures"] += 1
+        metric["last_latency_ms"] = int((monotonic() - started) * 1000)
+        metric["last_result"] = "success" if success else "failed"
+        metric["last_timestamp"] = _utcnow()
+
+    def _schedule_source_reconcile(
+        self, group_id: str, source: str, requested_state: str, txid: str
+    ) -> None:
+        """Re-read the source after rapid activity so its latest physical state wins."""
+        group = self._groups.get(group_id)
+        if not group or source in {group.get("output"), group.get("behavior", {}).get("fallback_output")} :
+            return
+        controller = self._controller(group, source)
+        if not controller or controller.get("mode") != MODE_MIRROR:
+            return
+        previous = self._source_reconcile_tasks.pop(group_id, None)
+        if previous:
+            previous.cancel()
+        task = self.hass.async_create_task(
+            self._async_reconcile_source(group_id, source, requested_state, txid)
+        )
+        self._source_reconcile_tasks[group_id] = task
+        task.add_done_callback(
+            lambda done, gid=group_id: self._source_reconcile_tasks.pop(gid, None)
+            if self._source_reconcile_tasks.get(gid) is done else None
+        )
+
+    async def _async_reconcile_source(
+        self, group_id: str, source: str, requested_state: str, txid: str
+    ) -> None:
+        try:
+            for delay in (0.08, 0.22, 0.55):
+                await asyncio.sleep(delay)
+                group = self._groups.get(group_id)
+                runtime = self._runtime.get(group_id)
+                if not group or not runtime:
+                    return
+                if runtime.last_transaction_id != txid:
+                    runtime.stale_transactions_discarded += 1
+                    return
+                controller = self._controller(group, source)
+                current = self.hass.states.get(source)
+                if not controller or not current or current.state not in VALID_STATES:
+                    return
+                actual = self._controller_to_group_state(controller, current.state)
+                if actual != requested_state:
+                    runtime.input_sequence += 1
+                    await self.async_request_state(
+                        group_id, actual, source=source, origin="physical_controller",
+                        input_sequence=runtime.input_sequence, engine_delay_ms=0,
+                    )
+                    self._add_activity(
+                        group_id=group_id, source=source, event="source_reconciled",
+                        action=actual, result="success",
+                        message="Latest physical source state overrode an older transaction",
+                    )
+                    return
+        except asyncio.CancelledError:
+            return
+
+    def start_learn(self, role: str, timeout: float = 12.0) -> dict[str, Any]:
+        """Start a temporary entity-learning session."""
+        if role not in {"output", "controller"}:
+            raise ValueError("Invalid learn role")
+        allowed = {"switch", "light", "input_boolean", "fan"} if role == "output" else {
+            "switch", "light", "input_boolean", "binary_sensor", "button", "input_button", "event"
+        }
+        registry = er.async_get(self.hass)
+        entity_ids = []
+        for state in self.hass.states.async_all():
+            entity_id = state.entity_id
+            if entity_id.split(".", 1)[0] not in allowed:
+                continue
+            entry = registry.async_get(entity_id)
+            if entry and entry.platform == DOMAIN:
+                continue
+            entity_ids.append(entity_id)
+        session_id = uuid4().hex[:12]
+        session: dict[str, Any] = {
+            "id": session_id, "role": role, "status": "waiting", "created": monotonic(),
+            "expires": monotonic() + max(5.0, min(float(timeout), 30.0)),
+            "candidates": {}, "unsub": None, "finish_unsub": None, "timeout_unsub": None,
+        }
+
+        @callback
+        def on_change(event: Event) -> None:
+            old = event.data.get("old_state")
+            new = event.data.get("new_state")
+            if new is None or new.state in UNAVAILABLE_STATES:
+                return
+            if old and old.state == new.state and new.entity_id.split(".", 1)[0] != "event":
+                return
+            domain = new.entity_id.split(".", 1)[0]
+            score = 100 if domain in {"switch", "light", "input_boolean"} else 92
+            if domain in {"button", "input_button", "event"}:
+                score = 96
+            if domain == "fan":
+                score = 82
+            recommended_mode = MODE_EVENT if domain in {"button", "input_button", "event"} else MODE_MIRROR
+            session["candidates"][new.entity_id] = {
+                "entity_id": new.entity_id, "domain": domain, "score": score,
+                "old_state": old.state if old else None, "new_state": new.state,
+                "recommended_mode": recommended_mode,
+            }
+            if session["status"] == "waiting":
+                session["status"] = "capturing"
+                session["finish_unsub"] = async_call_later(
+                    self.hass, 0.8, lambda _now: self._finish_learn(session_id, "detected")
+                )
+
+        if entity_ids:
+            session["unsub"] = async_track_state_change_event(self.hass, entity_ids, on_change)
+        session["timeout_unsub"] = async_call_later(
+            self.hass, max(5.0, min(float(timeout), 30.0)),
+            lambda _now: self._finish_learn(session_id, "timeout"),
+        )
+        self._learn_sessions[session_id] = session
+        return {"session_id": session_id, "status": "waiting", "timeout": timeout}
+
+    @callback
+    def _finish_learn(self, session_id: str, status: str) -> None:
+        session = self._learn_sessions.get(session_id)
+        if not session or session.get("status") in {"detected", "timeout", "cancelled"}:
+            return
+        session["status"] = status if session.get("candidates") else "timeout"
+        for key in ("unsub", "finish_unsub", "timeout_unsub"):
+            unsub = session.get(key)
+            if unsub:
+                unsub()
+                session[key] = None
+
+    def learn_status(self, session_id: str) -> dict[str, Any]:
+        """Return learn session status and ranked candidates."""
+        session = self._learn_sessions.get(session_id)
+        if not session:
+            raise ValueError("Learn session not found")
+        if monotonic() >= session["expires"] and session["status"] not in {"detected", "timeout", "cancelled"}:
+            self._finish_learn(session_id, "timeout")
+        candidates = sorted(
+            session["candidates"].values(), key=lambda item: (-item["score"], item["entity_id"])
+        )
+        return {
+            "session_id": session_id, "role": session["role"], "status": session["status"],
+            "candidates": candidates[:8],
+        }
+
+    def cancel_learn(self, session_id: str) -> bool:
+        session = self._learn_sessions.get(session_id)
+        if not session:
+            return False
+        for key in ("unsub", "finish_unsub", "timeout_unsub"):
+            unsub = session.get(key)
+            if unsub:
+                unsub()
+        session["status"] = "cancelled"
+        self._learn_sessions.pop(session_id, None)
+        return True
 
     def _add_activity(self, **entry: Any) -> None:
         item = {

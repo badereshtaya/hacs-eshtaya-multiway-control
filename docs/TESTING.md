@@ -1,28 +1,63 @@
 # Field Test Matrix
 
-Before publishing a release broadly, test the integration on a non-critical lighting circuit and verify each scenario below.
+Run repository CI and field-test on a non-critical circuit before broad deployment.
 
-| Scenario | Expected result |
+## Multi-Way
+
+| Scenario | Expected |
 | --- | --- |
-| Output OFF → ON physically | Group becomes ON and reflective controllers synchronize ON |
-| Output ON → OFF physically | Group becomes OFF and reflective controllers synchronize OFF |
-| Mirror controller changes | Output confirms first, then followers synchronize |
-| Toggle controller changes | Confirmed group state toggles once only |
-| Momentary controller pulse | One pulse produces one logical toggle |
-| Button/input_button/event controller | Every real event produces one toggle, with no reflection command |
-| Controller becomes unavailable | Load is not changed; group health degrades |
-| Controller returns | Controller is reconciled; return state is not treated as a press |
-| Output becomes unavailable | Group reports output offline and does not invent a new state |
-| Output returns with `adopt` | Returned physical state becomes authoritative |
-| Output returns with `enforce` | Last desired state is requested after recovery |
-| Delayed state confirmation | Transaction waits within configured timeout |
-| Failed output command | Desired state is not falsely committed; failure is logged/diagnosed |
-| Rapid alternating presses | Per-group lock/debounce prevents feedback loops/races |
-| Home Assistant restart | Startup protection prevents false toggles during entity restoration |
-| Deleted source entity | Health/Repairs identifies the missing entity |
-| Sync Now | Followers reconcile to the confirmed output/desired state |
-| Disable group | Synchronization stops without deleting configuration |
-| JSON export/import | Configuration restores without entity overlap or silent data loss |
-| Integration removal | Persistent integration storage and its Repair issues are removed |
+| Main OFF → ON | Group/followers end ON |
+| Main ON → OFF | Group/followers end OFF |
+| Secondary Mirror | Main and other followers match |
+| Secondary ON → OFF rapidly | Final Main state is OFF; no stale ON wins |
+| Repeated rapid alternating edges | FIFO order preserved; latest physical state wins |
+| Toggle/momentary/event controller | Exactly one logical action per valid edge/pulse |
+| Controller unavailable/restored | No false press; reflection heals on return |
+| Main unavailable | Latest desired physical state retained, not a stale command queue |
+| Fallback output configured | Fallback can carry output command per engine policy |
+| HA restart | Startup guard prevents false toggles |
+| Test Center Toggle/Press | Real end-to-end path runs and group follows |
+| Rapid x4 | Final source/output state matches and test passes |
 
-Also validate the repository Actions (HACS, Hassfest, Ruff, Pytest) on every release candidate.
+## Smart Groups
+
+| Scenario | Expected |
+| --- | --- |
+| Virtual group ON/OFF | Every enabled non-quarantined member follows |
+| Physical controller Mirror | Members follow controller state |
+| Physical controller Toggle | Every valid controller edge toggles once |
+| Any-ON policy | Aggregate state ON when at least one member ON |
+| All-ON policy | Aggregate state ON only when all active members ON |
+| Bidirectional member change | Group adopts member state and propagates safely |
+| Rapid controller edges | FIFO queue preserves arrival order |
+| Scene changes multiple members | Scene guard adopts resulting aggregate state |
+| Member flapping | Member is quarantined; group remains controllable |
+| Manual quarantine/release | Quarantined member excluded/restored as expected |
+| Member offline | Health degrades; remaining members are not corrupted |
+| Maintenance mode | Runtime fan-out is blocked without deleting config |
+| Locked group | Destructive config changes are rejected until unlocked |
+| Instant/Balanced/Safe | All modes reach correct final state |
+
+## Commissioning / recovery
+
+- Learn Main and every Multi-Way controller.
+- Learn physical Smart Group controller and Smart Group members.
+- Area quick-group creation includes only compatible commandable entities.
+- Native Home Assistant group import produces a Smart Group while original stays unchanged.
+- Clone physical group requires selecting a new physical controller.
+- Template creates a clean editable draft.
+- Missing entity appears in Repair Center and can be remapped.
+- Undo restores the last Multi-Way/Smart configuration snapshot.
+- Full backup restores both engines and rejects malformed/future schema data.
+- Configuration Lock blocks create/edit/delete/import/remap operations.
+- Full System Test totals match actual available/offline entities.
+
+## Repository CI
+
+Every release candidate must pass:
+
+- HACS validation
+- Hassfest
+- Ruff
+- Pytest
+- Release tag/version check
