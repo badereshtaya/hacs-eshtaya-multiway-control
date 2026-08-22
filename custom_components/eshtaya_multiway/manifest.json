@@ -17,5 +17,5 @@
   "issue_tracker": "https://github.com/badereshtaya/hacs-eshtaya-multiway-control/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "3.3.0"
+  "version": "3.3.1"
 }

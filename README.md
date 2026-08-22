@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5" alt="Home Assistant 2026.3+">
 </p>
 
-> **Current release:** `3.3.0`  
+> **Current release:** `3.3.1`  
 > **Integration domain:** `eshtaya_multiway`  
 > **Repository:** `badereshtaya/hacs-eshtaya-multiway-control`
 

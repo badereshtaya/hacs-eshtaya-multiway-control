@@ -211,12 +211,27 @@ class EshtayaMultiWayPanel extends HTMLElement {
       ]);
       const deviceAreas = new Map((devices || []).map(d => [d.id, d.area_id || null]));
       const allowed = new Set([...SMART_GROUP_DOMAINS, "input_boolean", "input_button"]);
-      this._entities = entities
-        .filter(e => allowed.has((e.entity_id || "").split(".")[0]))
-        .map(e => {
-          const state=this._hass.states?.[e.entity_id], attrs=state?.attributes||{};
-          const effectiveArea = e.area_id || deviceAreas.get(e.device_id) || null;
-          return {...e,area_id:effectiveArea,_domain:(e.entity_id||"").split(".")[0],_device_class:attrs.device_class||"",_unit:attrs.unit_of_measurement||"",_state_class:attrs.state_class||""};
+      const registryById = new Map((entities || []).map(e => [e.entity_id, e]));
+      const entityIds = new Set([
+        ...(entities || []).map(e => e.entity_id),
+        ...Object.keys(this._hass.states || {})
+      ]);
+      this._entities = [...entityIds]
+        .filter(entityId => allowed.has((entityId || "").split(".")[0]))
+        .map(entityId => {
+          const registry=registryById.get(entityId)||{};
+          const state=this._hass.states?.[entityId], attrs=state?.attributes||{};
+          const effectiveArea = registry.area_id || deviceAreas.get(registry.device_id) || null;
+          return {
+            ...registry,
+            entity_id:entityId,
+            name:registry.name || attrs.friendly_name || registry.original_name || "",
+            area_id:effectiveArea,
+            _domain:(entityId||"").split(".")[0],
+            _device_class:attrs.device_class||"",
+            _unit:attrs.unit_of_measurement||"",
+            _state_class:attrs.state_class||""
+          };
         })
         .sort((a,b) => (a.entity_id || "").localeCompare(b.entity_id || ""));
       this._areas = (areas || []).sort((a,b) => (a.name || "").localeCompare(b.name || ""));
@@ -271,7 +286,7 @@ class EshtayaMultiWayPanel extends HTMLElement {
       <style>${this._styles()}.native-groups-card{margin-top:18px}.native-title-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.native-readonly{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;border:1px solid var(--divider-color);border-radius:999px;padding:4px 7px;color:var(--secondary-text-color)}.native-main{min-width:0}.native-main code{display:block;margin-top:4px;font-size:10px;overflow:hidden;text-overflow:ellipsis}.compact-empty{padding:38px 20px;margin-bottom:18px}.area-filter-wrap{margin:0 0 16px}.area-filter-label{display:flex;align-items:center;gap:7px;color:var(--secondary-text-color);font-size:10px;font-weight:650;margin:0 2px 8px}.area-filter-label ha-icon{--mdc-icon-size:16px}.area-tabs{display:flex;gap:8px;overflow-x:auto;padding:1px 1px 7px;scrollbar-width:thin}.area-tab{display:inline-flex;align-items:center;gap:8px;white-space:nowrap;border:1px solid var(--divider-color);background:var(--card-background-color);color:var(--primary-text-color);border-radius:999px;padding:0 12px;min-height:38px;cursor:pointer;font:inherit;font-size:12px}.area-tab b{display:grid;place-items:center;min-width:22px;height:22px;padding:0 6px;border-radius:999px;background:var(--secondary-background-color);font-size:10px}.area-tab.active{border-color:var(--primary-color);background:color-mix(in srgb,var(--primary-color) 10%,var(--card-background-color));color:var(--primary-color);font-weight:750}.area-tab.active b{background:color-mix(in srgb,var(--primary-color) 15%,var(--secondary-background-color))}.inline-area-icon{--mdc-icon-size:13px;vertical-align:-2px;margin-inline:2px 3px}@media(max-width:600px){.area-filter-label{display:none}.area-tabs{margin-inline:-2px}.area-tab{min-height:42px}}</style>
       <main class="app" dir="${rtl ? "rtl" : "ltr"}">
         <header class="hero control-hero">
-          <div><div class="eyebrow">ESHTAYA SMART · v${this.esc(this._data.version || "3.3.0")}</div><h1>${this.t("controlCenter")}</h1><p>${this.t("subtitle")}</p></div>
+          <div><div class="eyebrow">ESHTAYA SMART · v${this.esc(this._data.version || "3.3.1")}</div><h1>${this.t("controlCenter")}</h1><p>${this.t("subtitle")}</p></div>
           <div class="hero-actions">
             <button class="secondary" data-action="refresh"><ha-icon icon="mdi:refresh"></ha-icon>${this.t("refresh")}</button>
             <button class="secondary" data-action="full-test"><ha-icon icon="mdi:clipboard-check-outline"></ha-icon>${this.t("fullTest")}</button>
@@ -321,7 +336,7 @@ class EshtayaMultiWayPanel extends HTMLElement {
     const ms=this._data.summary||{}, ss=this._smart.summary||{};
     return `<div class="dashboard-grid">
       <section class="dash-main settings-card">
-        <div class="section-head"><div><h2>${this.t("controlCenter")}</h2><p>${this._smart.settings?.project_name?this.esc(this._smart.settings.project_name):"Eshtaya Smart"}</p></div><span class="version-chip">v${this.esc(this._data.version||"3.3.0")}</span></div>
+        <div class="section-head"><div><h2>${this.t("controlCenter")}</h2><p>${this._smart.settings?.project_name?this.esc(this._smart.settings.project_name):"Eshtaya Smart"}</p></div><span class="version-chip">v${this.esc(this._data.version||"3.3.1")}</span></div>
         <div class="quick-grid">
           <button class="quick-card" data-action="add"><ha-icon icon="mdi:electric-switch"></ha-icon><b>${this.t("addMulti")}</b><small>${ms.groups||0} ${this.t("groups")}</small></button>
           <button class="quick-card" data-action="smart-add"><ha-icon icon="mdi:lightbulb-group"></ha-icon><b>${this.t("addSmart")}</b><small>${ss.groups||0} ${this.t("groups")}</small></button>
@@ -822,10 +837,19 @@ class EshtayaMultiWayPanel extends HTMLElement {
       smartForm.addEventListener("submit", e=>{e.preventDefault();this._saveSmartGroup();});
       smartForm.addEventListener("input", e=>{
         this._captureSmartDraft();
-        if(e.target?.dataset?.field==="entity_id"&&this._hass?.states?.[e.target.value]){
-          const row=e.target.closest("[data-smart-member-row]"),rows=[...this.shadowRoot.querySelectorAll("[data-smart-member-row]")],index=rows.indexOf(row),value=String(e.target.value||"");
+        const value=String(e.target?.value||"");
+        const knownEntity=value&&this._entities.some(item=>item.entity_id===value);
+        if(e.target?.dataset?.field==="entity_id"&&knownEntity){
+          const row=e.target.closest("[data-smart-member-row]"),rows=[...this.shadowRoot.querySelectorAll("[data-smart-member-row]")],index=rows.indexOf(row);
+          const type=this._smartType(this._smartEditing);
+          const wrongDomain=value.split(".")[0]!==type;
           const duplicate=this._smartEditing.members.some((m,i)=>i!==index&&m.entity_id===value)||(this._smartEditing.kind==="physical"&&this._smartEditing.controller_entity===value);
-          if(duplicate){this._smartEditing.members[index].entity_id="";this._toast(this.t("entityAlreadyUsed"),"error");}
+          if(wrongDomain){this._smartEditing.members[index].entity_id="";this._toast(`${this.t("groupDomain")}: ${type}`,"error");}
+          else if(duplicate){this._smartEditing.members[index].entity_id="";this._toast(this.t("entityAlreadyUsed"),"error");}
+          this._render();
+        } else if(e.target?.name==="controller_entity"&&knownEntity){
+          const duplicate=(this._smartEditing.members||[]).some(m=>m.entity_id===value);
+          if(duplicate){this._smartEditing.controller_entity="";this._toast(this.t("entityAlreadyUsed"),"error");}
           this._render();
         }
       });
@@ -836,6 +860,7 @@ class EshtayaMultiWayPanel extends HTMLElement {
           const type=String(e.target.value||"light");
           this._smartEditing.group_type=type;this._smartEditing.virtual_type=type;
           if(!SMART_PHYSICAL_DOMAINS.has(type)&&this._smartEditing.kind==="physical"){this._smartEditing.kind="virtual";this._smartEditing.controller_entity=null;}
+          if(SMART_ACTION_DOMAINS.has(type)&&this._smartEditing.behavior?.controller_mode==="mirror")this._smartEditing.behavior.controller_mode="event";
           this._smartEditing.members=(this._smartEditing.members||[]).map(m=>((m.entity_id||"").split(".")[0]===type?m:{...m,entity_id:""}));
           if(!this._smartEditing.members.length)this._smartEditing.members=[{entity_id:"",enabled:true}];
           this._render();return;
@@ -884,7 +909,7 @@ class EshtayaMultiWayPanel extends HTMLElement {
       if (action === "close-test") {
         this._testBusy=null; this._rapidBusy=null; this._testResult=null; this._testResults={}; await this._refresh(false); return this._render();
       }
-      if (action === "refresh") return await this._refresh(this._tab==="activity");
+      if (action === "refresh") { await Promise.all([this._loadCatalog(),this._loadNativeGroups(),this._refresh(this._tab==="activity")]); return this._render(); }
       if (action === "refresh-activity") return await this._refresh(true);
       if (action === "sync-all") { await this._hass.callWS({type:`${DOMAIN}/sync_all`}); this._toast(this.t("saved")); return await this._refresh(false); }
       if (action === "sync") { await this._hass.callWS({type:`${DOMAIN}/sync`,group_id:id}); this._toast(this.t("saved")); return await this._refresh(false); }
@@ -912,7 +937,16 @@ class EshtayaMultiWayPanel extends HTMLElement {
       if (action === "smart-add") return this._openSmartEditor(null);
       if (action === "smart-edit") return this._openSmartEditor((this._smart.groups||[]).find(g=>g.id===id));
       if (action === "smart-close") { await this._cancelSmartLearn(false); this._smartEditing=null; return this._render(); }
-      if (action === "smart-member-add") { this._captureSmartDraft(); this._smartEditing.members.push({entity_id:"",enabled:true}); return this._render(); }
+      if (action === "smart-member-add") {
+        this._captureSmartDraft();
+        if(!this._smartEditing)return;
+        const type=this._smartType(this._smartEditing), compatibility=this._smartEditing.behavior?.compatibility_mode||"strict";
+        const probe=[...(this._smartEditing.members||[]),{entity_id:"",enabled:true}];
+        const candidates=this._smartMemberCandidatesForRow(type,probe,compatibility,probe.length-1,this._smartEditing.controller_entity);
+        if(!candidates.length)return this._toast(this.t("noUnusedEntities"),"error");
+        this._smartEditing.members.push({entity_id:"",enabled:true});
+        return this._render();
+      }
       if (action === "smart-member-remove") { this._captureSmartDraft(); if(this._smartEditing.members.length>1)this._smartEditing.members.splice(Number(btn.dataset.index),1); return this._render(); }
       if (action === "smart-toggle-enabled") {
         await this._hass.callWS({type:`${DOMAIN}/smart/set_enabled`,group_id:id,enabled:btn.dataset.enabled!=="true"});
@@ -1061,12 +1095,14 @@ class EshtayaMultiWayPanel extends HTMLElement {
   _captureSmartDraft() {
     const form=this.shadowRoot.getElementById("smart-form"); if(!form||!this._smartEditing)return;
     const fd=new FormData(form), g=this._smartEditing, b=g.behavior||{};
-    g.name=fd.get("name")||"";g.group_type=fd.get("group_type")||g.group_type||"light";g.virtual_type=g.group_type;g.kind=fd.get("kind")||"virtual";g.area_id=fd.get("area_id")||null;
+    g.name=fd.get("name")||"";g.group_type=String(fd.get("group_type")||g.group_type||"light");g.virtual_type=g.group_type;g.kind=fd.get("kind")||"virtual";g.area_id=fd.get("area_id")||null;
+    const type=g.group_type;
     if(!SMART_PHYSICAL_DOMAINS.has(g.group_type)&&g.kind==="physical")g.kind="virtual";
     g.controller_entity=g.kind==="physical"?(fd.get("controller_entity")||""):null;
     g.members=[...this.shadowRoot.querySelectorAll("[data-smart-member-row]")].map(row=>({entity_id:row.querySelector('[data-field="entity_id"]').value,enabled:row.querySelector('[data-field="enabled"]').checked}));
     g.favorite=fd.get("favorite")==="on";g.maintenance=fd.get("maintenance")==="on";g.locked=fd.get("locked")==="on";g.hide_members=fd.get("hide_members")==="on";
-    g.behavior={...b,state_policy:fd.get("state_policy")||b.state_policy||"any",direction:fd.get("direction")||"controller_only",controller_mode:fd.get("controller_mode")||b.controller_mode||"mirror",invert_controller:fd.get("invert_controller")==="on",reflect_controller:g.kind==="physical"&&fd.get("reflect_controller")==="on",performance_mode:fd.get("performance_mode")||"instant",auto_heal:fd.get("auto_heal")==="on",verify_members:fd.get("verify_members")==="on",continuous_enforcement:fd.get("continuous_enforcement")==="on",command_echo_ms:Number(fd.get("command_echo_ms")||5000),command_timeout:Number(fd.get("command_timeout")||3),max_retries:Number(fd.get("max_retries")||0),member_delay_ms:Number(fd.get("member_delay_ms")||0),failure_policy:fd.get("failure_policy")||"continue",manual_priority_ms:Number(fd.get("manual_priority_ms")||0),source_stable_ms:Number(fd.get("source_stable_ms")||b.source_stable_ms||220),scene_guard_ms:Number(fd.get("scene_guard_ms")||0),flap_threshold:Number(fd.get("flap_threshold")||8),flap_window_sec:Number(fd.get("flap_window_sec")||10),quarantine_sec:Number(fd.get("quarantine_sec")||60),notify_on_fault:fd.get("notify_on_fault")==="on",compatibility_mode:fd.get("compatibility_mode")||"strict",sensor_calc_type:fd.get("sensor_calc_type")||b.sensor_calc_type||"mean",ignore_non_numeric:fd.get("ignore_non_numeric")==="on",action_execution:fd.get("action_execution")||b.action_execution||"parallel",automation_skip_condition:type==="automation"?fd.get("automation_skip_condition")==="on":b.automation_skip_condition!==false,action_cooldown_ms:Number(fd.get("action_cooldown_ms")||b.action_cooldown_ms||250),scene_transition:Number(fd.get("scene_transition")||0),action_data:b.action_data||{}};
+    const automationSkipRaw=fd.get("automation_skip_condition");
+    g.behavior={...b,state_policy:fd.get("state_policy")||b.state_policy||"any",direction:fd.get("direction")||"controller_only",controller_mode:fd.get("controller_mode")||b.controller_mode||"mirror",invert_controller:fd.get("invert_controller")==="on",reflect_controller:g.kind==="physical"&&fd.get("reflect_controller")==="on",performance_mode:fd.get("performance_mode")||"instant",auto_heal:fd.get("auto_heal")==="on",verify_members:fd.get("verify_members")==="on",continuous_enforcement:fd.get("continuous_enforcement")==="on",command_echo_ms:Number(fd.get("command_echo_ms")||5000),command_timeout:Number(fd.get("command_timeout")||3),max_retries:Number(fd.get("max_retries")||0),member_delay_ms:Number(fd.get("member_delay_ms")||0),failure_policy:fd.get("failure_policy")||"continue",manual_priority_ms:Number(fd.get("manual_priority_ms")||0),source_stable_ms:Number(fd.get("source_stable_ms")||b.source_stable_ms||220),scene_guard_ms:Number(fd.get("scene_guard_ms")||0),flap_threshold:Number(fd.get("flap_threshold")||8),flap_window_sec:Number(fd.get("flap_window_sec")||10),quarantine_sec:Number(fd.get("quarantine_sec")||60),notify_on_fault:fd.get("notify_on_fault")==="on",compatibility_mode:fd.get("compatibility_mode")||"strict",sensor_calc_type:fd.get("sensor_calc_type")||b.sensor_calc_type||"mean",ignore_non_numeric:fd.get("ignore_non_numeric")==="on",action_execution:fd.get("action_execution")||b.action_execution||"parallel",automation_skip_condition:type==="automation"?(automationSkipRaw===null?b.automation_skip_condition!==false:automationSkipRaw==="on"):b.automation_skip_condition!==false,action_cooldown_ms:Number(fd.get("action_cooldown_ms")||b.action_cooldown_ms||250),scene_transition:Number(fd.get("scene_transition")||0),action_data:b.action_data||{}};
     delete g.behavior._action_data_invalid;const actionDataRaw=String(fd.get("action_data")||"").trim();if(actionDataRaw){try{const parsed=JSON.parse(actionDataRaw);if(parsed&&typeof parsed==="object"&&!Array.isArray(parsed))g.behavior.action_data=parsed;}catch(_){g.behavior._action_data_invalid=actionDataRaw;}}else{g.behavior.action_data={};}
   }
 

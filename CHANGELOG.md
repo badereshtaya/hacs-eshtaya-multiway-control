@@ -1,5 +1,19 @@
 # Changelog
 
+## 3.3.1 - 2026-08-22
+
+### Fixed
+- Fixed `ReferenceError: type is not defined` in the Smart Group editor draft capture path.
+- Fixed group-domain switching being stuck on Light members because the change handler crashed before rebuilding candidates.
+- Fixed **Add Member** failing for the same frontend exception.
+- Smart member discovery now merges Entity Registry entries with live Home Assistant states, including YAML/state-only Scene, Script and Automation entities.
+- Added defensive candidate checks before appending a new Smart Group member row.
+- Member/controller pickers now refresh immediately for registry-only entities too, not only entities already present in live state.
+- Manual Refresh now reloads the entity catalog and native groups in addition to runtime state.
+
+### Validation
+- Added a frontend runtime smoke test for domain switching, draft capture, member filtering, member addition and catalog merging.
+
 ## 3.3.0 - 2026-08-22
 
 ### Action Groups and final-source convergence
