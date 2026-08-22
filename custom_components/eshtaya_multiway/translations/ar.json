@@ -1,0 +1,140 @@
+{
+  "title": "Eshtaya Multi-Way Control",
+  "config": {
+    "step": {
+      "user": {
+        "title": "نظام Eshtaya Multi-Way Control",
+        "description": "ثبّت وحدة تحكم الفكسل البرمجية. بعد الإعداد استخدم Multi-Way Control من القائمة الجانبية لإنشاء وإدارة المجموعات."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "يمكن إعداد نسخة واحدة فقط من Eshtaya Multi-Way Control."
+    }
+  },
+  "entity": {
+    "light": {
+      "group_control": {
+        "name": "التحكم"
+      }
+    },
+    "switch": {
+      "group_control": {
+        "name": "التحكم"
+      },
+      "group_enabled": {
+        "name": "المزامنة"
+      }
+    },
+    "sensor": {
+      "health": {
+        "name": "حالة المجموعة"
+      },
+      "last_source": {
+        "name": "آخر زر"
+      },
+      "last_latency": {
+        "name": "آخر زمن استجابة"
+      }
+    },
+    "binary_sensor": {
+      "in_sync": {
+        "name": "متزامن"
+      }
+    },
+    "button": {
+      "sync_now": {
+        "name": "مزامنة الآن"
+      }
+    }
+  },
+  "issues": {
+    "missing_output": {
+      "title": "خرج مجموعة الفكسل مفقود",
+      "description": "الكيان {entity} المستخدم كخرج فعلي في المجموعة {group} لم يعد موجوداً. افتح Multi-Way Control واستبدله أو أعد الكيان الأصلي."
+    },
+    "missing_controller": {
+      "title": "زر فرعي في مجموعة الفكسل مفقود",
+      "description": "الكيان {entity} المستخدم كزر تحكم في المجموعة {group} لم يعد موجوداً. افتح Multi-Way Control واستبدله أو احذفه من المجموعة."
+    },
+    "output_unresponsive": {
+      "title": "الخرج الفعلي لا يؤكد الأوامر",
+      "description": "الخرج {entity} في المجموعة {group} فشل عدة مرات في تأكيد الأوامر. افحص اتصال الجهاز ثم استخدم مزامنة الآن بعد عودته للعمل."
+    }
+  },
+  "selector": {
+    "group_state": {
+      "options": {
+        "on": "تشغيل",
+        "off": "إيقاف"
+      }
+    }
+  },
+  "services": {
+    "sync_group": {
+      "name": "مزامنة مجموعة",
+      "description": "إعادة مزامنة مجموعة فكسل واحدة واعتماد الخرج الفعلي كمرجع.",
+      "fields": {
+        "group_id": {
+          "name": "معرّف المجموعة",
+          "description": "المعرّف الداخلي الظاهر في لوحة الإدارة وخصائص الكيان الافتراضي."
+        }
+      }
+    },
+    "sync_all": {
+      "name": "مزامنة كل المجموعات",
+      "description": "إعادة مزامنة جميع مجموعات الفكسل المفعّلة."
+    },
+    "enable_group": {
+      "name": "تفعيل مجموعة",
+      "description": "تفعيل المزامنة لمجموعة فكسل.",
+      "fields": {
+        "group_id": {
+          "name": "معرّف المجموعة",
+          "description": "المعرّف الداخلي للمجموعة."
+        }
+      }
+    },
+    "disable_group": {
+      "name": "تعطيل مجموعة",
+      "description": "تعطيل المزامنة بدون حذف إعدادات المجموعة.",
+      "fields": {
+        "group_id": {
+          "name": "معرّف المجموعة",
+          "description": "المعرّف الداخلي للمجموعة."
+        }
+      }
+    },
+    "set_group_state": {
+      "name": "تغيير حالة المجموعة",
+      "description": "تغيير الخرج الفعلي وباقي الأزرار من خلال محرك المعاملات الآمن.",
+      "fields": {
+        "group_id": {
+          "name": "معرّف المجموعة",
+          "description": "المعرّف الداخلي للمجموعة."
+        },
+        "state": {
+          "name": "الحالة",
+          "description": "الحالة المطلوبة للمجموعة."
+        }
+      }
+    },
+    "test_group": {
+      "name": "فحص المجموعة",
+      "description": "إرجاع تقرير جاهزية بدون تشغيل أو إطفاء الحمل الفعلي.",
+      "fields": {
+        "group_id": {
+          "name": "معرّف المجموعة",
+          "description": "المعرّف الداخلي للمجموعة."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "not_loaded": {
+      "message": "تكامل Eshtaya Multi-Way Control غير محمّل."
+    },
+    "group_error": {
+      "message": "فشلت عملية مجموعة الفكسل: {error}"
+    }
+  }
+}

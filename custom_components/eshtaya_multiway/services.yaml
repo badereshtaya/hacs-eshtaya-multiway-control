@@ -1,0 +1,44 @@
+sync_group:
+  fields:
+    group_id:
+      required: true
+      selector:
+        text:
+
+sync_all:
+
+enable_group:
+  fields:
+    group_id:
+      required: true
+      selector:
+        text:
+
+disable_group:
+  fields:
+    group_id:
+      required: true
+      selector:
+        text:
+
+set_group_state:
+  fields:
+    group_id:
+      required: true
+      selector:
+        text:
+    state:
+      required: true
+      selector:
+        select:
+          translation_key: group_state
+          options:
+            - "on"
+            - "off"
+
+test_group:
+  fields:
+    group_id:
+      required: true
+      selector:
+        text:

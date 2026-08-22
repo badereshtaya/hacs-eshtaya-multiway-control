@@ -1,0 +1,140 @@
+{
+  "title": "Eshtaya Multi-Way Control",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Eshtaya Multi-Way Control",
+        "description": "Install the multi-way controller. After setup, use Multi-Way Control in the sidebar to create and manage groups."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Only one Eshtaya Multi-Way Control instance can be configured."
+    }
+  },
+  "entity": {
+    "light": {
+      "group_control": {
+        "name": "Control"
+      }
+    },
+    "switch": {
+      "group_control": {
+        "name": "Control"
+      },
+      "group_enabled": {
+        "name": "Synchronization"
+      }
+    },
+    "sensor": {
+      "health": {
+        "name": "Health"
+      },
+      "last_source": {
+        "name": "Last source"
+      },
+      "last_latency": {
+        "name": "Last latency"
+      }
+    },
+    "binary_sensor": {
+      "in_sync": {
+        "name": "In sync"
+      }
+    },
+    "button": {
+      "sync_now": {
+        "name": "Sync now"
+      }
+    }
+  },
+  "issues": {
+    "missing_output": {
+      "title": "Multi-way output entity is missing",
+      "description": "The output entity {entity} used by group {group} no longer exists. Open Multi-Way Control and replace the output entity or restore the original entity."
+    },
+    "missing_controller": {
+      "title": "Multi-way controller entity is missing",
+      "description": "The controller entity {entity} used by group {group} no longer exists. Open Multi-Way Control and replace or remove that controller."
+    },
+    "output_unresponsive": {
+      "title": "Multi-way output is not confirming commands",
+      "description": "The physical output {entity} in group {group} has repeatedly failed to confirm commands. Check the device/integration connection, then use Sync Now after it is healthy."
+    }
+  },
+  "selector": {
+    "group_state": {
+      "options": {
+        "on": "On",
+        "off": "Off"
+      }
+    }
+  },
+  "services": {
+    "sync_group": {
+      "name": "Sync group",
+      "description": "Reconcile one multi-way group using the physical output as authority.",
+      "fields": {
+        "group_id": {
+          "name": "Group ID",
+          "description": "Internal group ID shown in the management panel and virtual entity attributes."
+        }
+      }
+    },
+    "sync_all": {
+      "name": "Sync all groups",
+      "description": "Reconcile every enabled multi-way group."
+    },
+    "enable_group": {
+      "name": "Enable group",
+      "description": "Enable synchronization for a group.",
+      "fields": {
+        "group_id": {
+          "name": "Group ID",
+          "description": "Internal group ID."
+        }
+      }
+    },
+    "disable_group": {
+      "name": "Disable group",
+      "description": "Disable synchronization without deleting the group.",
+      "fields": {
+        "group_id": {
+          "name": "Group ID",
+          "description": "Internal group ID."
+        }
+      }
+    },
+    "set_group_state": {
+      "name": "Set group state",
+      "description": "Change the physical output and synchronized followers through the transaction engine.",
+      "fields": {
+        "group_id": {
+          "name": "Group ID",
+          "description": "Internal group ID."
+        },
+        "state": {
+          "name": "State",
+          "description": "Desired group state."
+        }
+      }
+    },
+    "test_group": {
+      "name": "Test group",
+      "description": "Return a non-destructive readiness report without switching the physical load.",
+      "fields": {
+        "group_id": {
+          "name": "Group ID",
+          "description": "Internal group ID."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "not_loaded": {
+      "message": "Eshtaya Multi-Way Control is not loaded."
+    },
+    "group_error": {
+      "message": "Multi-way group operation failed: {error}"
+    }
+  }
+}
