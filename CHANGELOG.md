@@ -1,3 +1,8 @@
+## CI fixes
+
+- Install the exact Home Assistant frontend package required by the Home Assistant test version before running pytest.
+- Keep `frontend`, `http`, and `panel_custom` as runtime dependencies because the integration provides a native Home Assistant sidebar panel.
+
 # Changelog
 
 ## 2.0.0 - 2026-08-22
