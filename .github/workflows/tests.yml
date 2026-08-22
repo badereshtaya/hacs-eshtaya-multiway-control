@@ -23,4 +23,4 @@ jobs:
           python -m pip install --upgrade pip
           pip install pytest pytest-homeassistant-custom-component==0.13.356
       - name: Run tests
-        run: pytest -q
+        run: python -m pytest -q
