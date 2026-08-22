@@ -12,6 +12,7 @@
   ],
   "documentation": "https://github.com/badereshtaya/hacs-eshtaya-multiway-control",
   "integration_type": "helper",
+  "iot_class": "calculated",
   "issue_tracker": "https://github.com/badereshtaya/hacs-eshtaya-multiway-control/issues",
   "requirements": [],
   "single_config_entry": true,

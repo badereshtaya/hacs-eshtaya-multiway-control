@@ -9,6 +9,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import ServiceValidationError
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.typing import ConfigType
 
@@ -26,6 +27,9 @@ from .frontend import async_register_panel, async_register_static_assets, async_
 from .manager import MultiWayManager
 from .storage import MultiWayStore
 from .websocket import async_register_websocket_commands
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
 
 PLATFORMS: list[Platform] = [
     Platform.LIGHT,
