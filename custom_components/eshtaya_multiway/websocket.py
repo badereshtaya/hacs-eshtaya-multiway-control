@@ -21,14 +21,9 @@ from .const import (
     VIRTUAL_LIGHT,
     VIRTUAL_SWITCH,
     VERSION,
-    SMART_KIND_PHYSICAL,
     SMART_KIND_VIRTUAL,
     SMART_KINDS,
-    SMART_STATE_POLICIES,
-    SMART_DIRECTIONS,
-    SMART_FAILURE_POLICIES,
     SMART_MEMBER_DOMAINS,
-    SMART_CONTROLLER_DOMAINS,
 )
 
 CONTROLLER_SCHEMA = vol.Schema(
@@ -808,14 +803,16 @@ def _missing_references(hass: HomeAssistant) -> list[dict]:
     for group in data["store"].groups():
         refs = [("output", group["output"])] + [("controller", c["entity_id"]) for c in group["controllers"]]
         fallback = group.get("behavior", {}).get("fallback_output")
-        if fallback: refs.append(("fallback_output", fallback))
+        if fallback:
+            refs.append(("fallback_output", fallback))
         for role, entity_id in refs:
             if hass.states.get(entity_id) is None:
                 area_id, domain = meta(entity_id)
                 rows.append({"engine":"multiway","group_id":group["id"],"group_name":group["name"],"role":role,"entity_id":entity_id,"domain":domain,"area_id":area_id})
     for group in data["smart_store"].groups():
         refs = []
-        if group.get("controller_entity"): refs.append(("controller", group["controller_entity"]))
+        if group.get("controller_entity"):
+            refs.append(("controller", group["controller_entity"]))
         refs += [("member", m["entity_id"]) for m in group["members"]]
         for role, entity_id in refs:
             if hass.states.get(entity_id) is None:
@@ -842,11 +839,13 @@ async def ws_repair_remap(hass, connection, msg) -> None:
         _ensure_config_unlocked(hass)
         data = _runtime_all(hass)
         mapping = {str(k): str(v) for k, v in msg["mapping"].items() if k and v and k != v}
-        if not mapping: raise ValueError("A non-empty mapping is required")
+        if not mapping:
+            raise ValueError("A non-empty mapping is required")
         for entity_id in mapping.values():
             if hass.states.get(entity_id) is None:
                 raise ValueError(f"Replacement entity {entity_id} does not exist")
-        old_multi = data["store"].export_data(); old_smart = data["smart_store"].export_data()
+        old_multi = data["store"].export_data()
+        old_smart = data["smart_store"].export_data()
         try:
             await data["store"].async_remap_entities(mapping)
             await data["smart_store"].async_remap_entities(mapping)

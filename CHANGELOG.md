@@ -32,6 +32,7 @@
 - Changing a Smart Group virtual control type removes only the obsolete control entity and preserves diagnostic/config entities.
 - Full-system Multi-Way readiness now validates actual member availability instead of treating every returned snapshot as a pass.
 - Smart Group editor drafts survive live runtime updates, member changes and Learn sessions.
+- Ruff/CI compliance for entity platforms and WebSocket repair helpers; the Ruff action is pinned to a Node 24-compatible release.
 
 ### Changed
 
