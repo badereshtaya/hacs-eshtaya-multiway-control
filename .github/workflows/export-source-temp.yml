@@ -1,9 +1,7 @@
 name: Temporary source export
 
 on:
-  push:
-    paths:
-      - '.github/workflows/export-source-temp.yml'
+  pull_request:
   workflow_dispatch:
 
 jobs:
