@@ -1,0 +1,23 @@
+name: Temporary source export
+
+on:
+  push:
+    paths:
+      - '.github/workflows/export-source-temp.yml'
+  workflow_dispatch:
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package source
+        run: |
+          mkdir -p export
+          cp -R custom_components/eshtaya_multiway export/
+          cp README.md CHANGELOG.md hacs.json LICENSE export/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eshtaya-multiway-source
+          path: export
+          retention-days: 1
